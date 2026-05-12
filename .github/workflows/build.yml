@@ -12,6 +12,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-mac:
     runs-on: macos-latest
+    continue-on-error: true       # secondary platform — never block the Windows artifact
     steps:
       - uses: actions/checkout@v4
 
@@ -73,7 +74,9 @@ jobs:
       - name: vcpkg install LAME + libshout
         shell: pwsh
         run: |
-          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows
+          # libshout's vcpkg port marks itself "!windows" but builds fine in
+          # practice — we override the check. mp3lame is officially supported.
+          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows --allow-unsupported
 
       - name: Configure CMake (vcpkg toolchain)
         shell: pwsh

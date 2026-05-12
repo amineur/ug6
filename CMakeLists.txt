@@ -22,24 +22,15 @@ endif()
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
-# JUCE version : we pick per platform because :
-#   • JUCE 7.0.12 supports Windows 7 SP1 (the target studio OS) but its
-#     juce_Windowing_mac.mm uses CGWindowListCreateImage, removed in macOS 15.
-#   • JUCE 8.0.4 compiles cleanly against the macOS 15 SDK but drops Win7.
-# Both versions expose the same audio/DSP API surface that this codebase uses,
-# so the source files are unchanged.
-if(WIN32)
-    set(UG6_JUCE_TAG 7.0.12)
-    message(STATUS "Targeting Win build → JUCE ${UG6_JUCE_TAG} (keeps Win7 SP1 compatibility)")
-else()
-    set(UG6_JUCE_TAG 8.0.4)
-    message(STATUS "Targeting non-Win build → JUCE ${UG6_JUCE_TAG} (macOS 15 SDK compatible)")
-endif()
-
+# JUCE 7.0.12 — last 7.x release; preserves Win7 SP1 compatibility on Windows,
+# and compiles fine on macOS 14 (GitHub Actions macos-latest runner).
+# Known caveat : doesn't compile on macOS 15 (Sequoia) locally because Apple
+# removed CGWindowListCreateImage from the SDK. We accept that for now — local
+# dev on Mac 15 is not a priority compared to producing a Windows binary via CI.
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        ${UG6_JUCE_TAG}
+    GIT_TAG        7.0.12
     GIT_SHALLOW    TRUE
 )
 

@@ -59,17 +59,19 @@ int main (int argc, char** argv)
 
     std::cout << "UG6 Broadcaster started\n"
               << "  UI:     http://127.0.0.1:" << port << "\n"
-              << "  Device: " << engine.getCurrentDeviceName() << "\n"
+              << "  Input:  " << engine.getCurrentInputDevice()  << "\n"
+              << "  Output: " << engine.getCurrentOutputDevice() << "\n"
               << "  SR:     " << engine.getCurrentSampleRate() << " Hz\n"
               << "Press Ctrl+C to quit.\n" << std::flush;
 
     std::signal (SIGINT,  signalHandler);
     std::signal (SIGTERM, signalHandler);
 
-    // Pump the message manager so JUCE async callbacks fire while we wait for quit.
-    auto* mm = juce::MessageManager::getInstance();
+    // Audio callbacks come from CoreAudio / WASAPI threads, not the main thread,
+    // so we can just sleep here while we wait for SIGINT. JUCE 8 removed
+    // runDispatchLoopUntil(); juce::Thread::sleep is the portable replacement.
     while (! shouldQuit.load())
-        mm->runDispatchLoopUntil (100);
+        juce::Thread::sleep (100);
 
     std::cout << "Shutting down...\n";
     server.stop();
