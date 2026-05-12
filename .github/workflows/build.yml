@@ -51,21 +51,35 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Cache vcpkg installed packages
+        uses: actions/cache@v4
         with:
-          vcpkgGitCommitId: c8696863d371ab7f46e213d8f5ca923c4aef2a00
+          path: C:\vcpkg\installed
+          key: vcpkg-${{ runner.os }}-mp3lame-libshout-v1
+
+      - name: Setup vcpkg (fresh clone of master to ensure libshout port is present)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\vcpkg")) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg
+          } else {
+            cd C:\vcpkg
+            git pull --rebase --depth 1
+          }
+          cd C:\vcpkg
+          .\bootstrap-vcpkg.bat -disableMetrics
+          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
       - name: vcpkg install LAME + libshout
         shell: pwsh
         run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows
+          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows
 
       - name: Configure CMake (vcpkg toolchain)
         shell: pwsh
         run: |
           cmake -B build -A x64 `
-            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            "-DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DCMAKE_BUILD_TYPE=Release
 
@@ -81,12 +95,9 @@ jobs:
       - name: Bundle runtime DLLs next to the .exe
         shell: pwsh
         run: |
-          $binDir = "build\UG6Broadcaster_artefacts\Release"
-          if (-not (Test-Path $binDir)) {
-            $binDir = (Get-ChildItem -Recurse -File -Include "UG6Broadcaster.exe" build\UG6Broadcaster_artefacts | Select-Object -First 1).Directory.FullName
-            Write-Host "Real binary directory: $binDir"
-          }
-          $vcpkgBin = "$env:VCPKG_ROOT\installed\x64-windows\bin"
+          $binDir = (Get-ChildItem -Recurse -File -Include "UG6Broadcaster.exe" build\UG6Broadcaster_artefacts | Select-Object -First 1).Directory.FullName
+          Write-Host "Binary directory: $binDir"
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
           Write-Host "Copying DLLs from $vcpkgBin to $binDir"
           Copy-Item "$vcpkgBin\*.dll" $binDir -Force
           Get-ChildItem $binDir
