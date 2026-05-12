@@ -449,21 +449,17 @@
 
       <!-- Lib missing banner -->
       <div x-show="!state.broadcast.available" class="bg-amber-900/30 border border-amber-700/50 rounded p-3 text-[11px] text-amber-300 mb-2 space-y-2">
-        <div class="font-semibold">⚠ Encoder MP3 / libshout indisponibles dans ce binaire.</div>
-        <div class="text-amber-200/80">Installe les libs Homebrew puis rebuild (2 commandes séparées) :</div>
+        <div class="font-semibold">⚠ Encoder MP3 indisponible dans ce binaire.</div>
+        <div class="text-amber-200/80">Installe LAME puis rebuild :</div>
         <div>
-          <div class="text-[10px] text-amber-400/70 mb-0.5">1 · installer les libs (une fois)</div>
-          <pre class="bg-black/50 p-2 rounded font-mono text-[11px] text-amber-100 whitespace-pre-wrap select-all">brew install lame libshout</pre>
+          <div class="text-[10px] text-amber-400/70 mb-0.5">1 · installer LAME (une fois)</div>
+          <pre class="bg-black/50 p-2 rounded font-mono text-[11px] text-amber-100 whitespace-pre-wrap select-all">brew install lame</pre>
         </div>
         <div>
-          <div class="text-[10px] text-amber-400/70 mb-0.5">2 · quitter UG6 (Ctrl+C) puis rebuild</div>
+          <div class="text-[10px] text-amber-400/70 mb-0.5">2 · rebuild</div>
           <pre class="bg-black/50 p-2 rounded font-mono text-[11px] text-amber-100 whitespace-pre-wrap select-all">cd ~/Documents/Claude/Projects/UG6
-cmake -B build -G Xcode
-cmake --build build --config Release
-./build/UG6Broadcaster_artefacts/Release/UG6Broadcaster --port=8000</pre>
-        </div>
-        <div class="text-[10px] text-amber-400/70">
-          Tu dois voir « LAME found » et « libshout found » dans la sortie de cmake.
+cmake -B build
+cmake --build build -j</pre>
         </div>
       </div>
 

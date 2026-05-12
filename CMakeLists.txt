@@ -75,9 +75,14 @@ target_sources(UG6Broadcaster PRIVATE
 )
 
 # ---------------------------------------------------------------------------
-#  Optional encoder / streaming deps
-#  On macOS install via Homebrew: brew install lame libshout
-#  If missing, the build still works — BroadcastSender becomes a no-op stub.
+#  Encoder dependency : LAME (MP3 encode).
+#  Icecast push is implemented natively on top of juce::StreamingSocket — no
+#  libshout needed, no DLL to bundle on Windows besides libmp3lame.
+#
+#  Install paths probed :
+#    macOS : Homebrew (/opt/homebrew) or MacPorts (/opt/local) or /usr/local
+#    Win   : vcpkg toolchain (when CMAKE_TOOLCHAIN_FILE is set, find_library
+#            also searches the vcpkg "installed/" tree automatically).
 # ---------------------------------------------------------------------------
 set(UG6_BREW_HINTS /opt/homebrew /usr/local /opt/local)
 
@@ -86,29 +91,14 @@ find_path(LAME_INCLUDE_DIR lame/lame.h
 find_library(LAME_LIBRARY mp3lame
     HINTS ${UG6_BREW_HINTS} PATH_SUFFIXES lib)
 
-find_path(SHOUT_INCLUDE_DIR shout/shout.h
-    HINTS ${UG6_BREW_HINTS} PATH_SUFFIXES include)
-find_library(SHOUT_LIBRARY shout
-    HINTS ${UG6_BREW_HINTS} PATH_SUFFIXES lib)
-
 if(LAME_INCLUDE_DIR AND LAME_LIBRARY)
     message(STATUS "LAME found: ${LAME_LIBRARY}")
     target_compile_definitions(UG6Broadcaster PRIVATE UG6_HAS_LAME=1)
     target_include_directories(UG6Broadcaster PRIVATE ${LAME_INCLUDE_DIR})
     target_link_libraries(UG6Broadcaster PRIVATE ${LAME_LIBRARY})
 else()
-    message(WARNING "LAME not found — MP3 encoder will be disabled.\n  macOS : brew install lame")
+    message(WARNING "LAME not found — MP3 encoder will be disabled.\n  macOS : brew install lame\n  Windows : vcpkg install mp3lame:x64-windows")
     target_compile_definitions(UG6Broadcaster PRIVATE UG6_HAS_LAME=0)
-endif()
-
-if(SHOUT_INCLUDE_DIR AND SHOUT_LIBRARY)
-    message(STATUS "libshout found: ${SHOUT_LIBRARY}")
-    target_compile_definitions(UG6Broadcaster PRIVATE UG6_HAS_SHOUT=1)
-    target_include_directories(UG6Broadcaster PRIVATE ${SHOUT_INCLUDE_DIR})
-    target_link_libraries(UG6Broadcaster PRIVATE ${SHOUT_LIBRARY})
-else()
-    message(WARNING "libshout not found — Icecast push will be disabled.\n  macOS : brew install libshout")
-    target_compile_definitions(UG6Broadcaster PRIVATE UG6_HAS_SHOUT=0)
 endif()
 
 target_include_directories(UG6Broadcaster PRIVATE src)

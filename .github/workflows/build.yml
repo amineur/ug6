@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LAME + libshout
-        run: brew install lame libshout
+      - name: Install LAME
+        run: brew install lame
 
       - name: Configure
         run: >
@@ -56,27 +56,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-${{ runner.os }}-mp3lame-libshout-v1
+          key: vcpkg-${{ runner.os }}-mp3lame-only-v2
 
-      - name: Setup vcpkg (fresh clone of master to ensure libshout port is present)
+      - name: Setup vcpkg
         shell: pwsh
         run: |
           if (-not (Test-Path "C:\vcpkg")) {
             git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg
-          } else {
-            cd C:\vcpkg
-            git pull --rebase --depth 1
           }
           cd C:\vcpkg
           .\bootstrap-vcpkg.bat -disableMetrics
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-      - name: vcpkg install LAME + libshout
+      - name: vcpkg install LAME
         shell: pwsh
         run: |
-          # libshout's vcpkg port marks itself "!windows" but builds fine in
-          # practice — we override the check. mp3lame is officially supported.
-          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows --allow-unsupported
+          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows
 
       - name: Configure CMake (vcpkg toolchain)
         shell: pwsh

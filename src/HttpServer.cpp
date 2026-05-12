@@ -494,7 +494,7 @@ void HttpServer::setupRoutes()
         if (! BroadcastSender::isAvailable())
         {
             res.status = 503;
-            res.set_content ("encodeur indisponible — installe LAME + libshout puis recompile :\n  brew install lame libshout",
+            res.set_content ("encodeur indisponible — installe LAME puis recompile :\n  brew install lame",
                              "text/plain");
             return;
         }

@@ -6,33 +6,15 @@
  }
 #endif
 
-#if UG6_HAS_SHOUT
- extern "C" {
-   #include <shout/shout.h>
- }
-#endif
-
 #include <chrono>
 #include <cstring>
-#include <mutex>
 
 // ---------------------------------------------------------------------------
 //  Lifecycle
 // ---------------------------------------------------------------------------
-namespace
-{
-   #if UG6_HAS_SHOUT
-    void initShoutOnce()
-    {
-        static std::once_flag flag;
-        std::call_once (flag, [] { shout_init(); });
-    }
-   #endif
-}
-
 bool BroadcastSender::isAvailable()
 {
-   #if UG6_HAS_LAME && UG6_HAS_SHOUT
+   #if UG6_HAS_LAME
     return true;
    #else
     return false;
@@ -41,8 +23,7 @@ bool BroadcastSender::isAvailable()
 
 BroadcastSender::BroadcastSender()
 {
-   #if UG6_HAS_LAME && UG6_HAS_SHOUT
-    initShoutOnce();
+   #if UG6_HAS_LAME
     status.store (Status::Disconnected);
     running.store (true);
     senderThread = std::thread ([this] { senderThreadLoop(); });
@@ -53,7 +34,7 @@ BroadcastSender::BroadcastSender()
 
 BroadcastSender::~BroadcastSender()
 {
-   #if UG6_HAS_LAME && UG6_HAS_SHOUT
+   #if UG6_HAS_LAME
     running.store (false);
     wantsToBeConnected.store (false);
     if (senderThread.joinable())
@@ -68,9 +49,9 @@ void BroadcastSender::prepare (double sr) { sampleRate = sr; }
 // ---------------------------------------------------------------------------
 void BroadcastSender::pushAudio (float* const* channels, int numCh, int numSamples)
 {
-   #if UG6_HAS_LAME && UG6_HAS_SHOUT
+   #if UG6_HAS_LAME
     if (numSamples <= 0 || numCh <= 0) return;
-    if (status.load (std::memory_order_relaxed) != Status::Connected) return;  // don't buffer when offline
+    if (status.load (std::memory_order_relaxed) != Status::Connected) return;
 
     int s1, sz1, s2, sz2;
     fifo.prepareToWrite (numSamples, s1, sz1, s2, sz2);
@@ -101,8 +82,6 @@ void BroadcastSender::setConfig (const Config& c)
         const juce::ScopedLock sl (configLock);
         config = c;
     }
-    // Bump the epoch so the sender thread can detect the change and
-    // recycle the LAME/Shout objects on the fly.
     configEpoch.fetch_add (1);
 }
 
@@ -141,15 +120,16 @@ void BroadcastSender::setError (const juce::String& msg)
 }
 
 // ---------------------------------------------------------------------------
-//  Sender thread + connection management
+//  Sender thread + connection management (native Icecast SOURCE protocol)
 // ---------------------------------------------------------------------------
-#if UG6_HAS_LAME && UG6_HAS_SHOUT
+#if UG6_HAS_LAME
 
 bool BroadcastSender::openConnection()
 {
     setError ({});
     Config cfg = getConfig();
 
+    // ----- 1. Initialise LAME -----
     auto* lame = lame_init();
     if (lame == nullptr) { setError ("lame_init() a échoué"); return false; }
 
@@ -167,56 +147,84 @@ bool BroadcastSender::openConnection()
     }
     lameCtx = lame;
 
-    auto* shout = shout_new();
-    if (shout == nullptr)
+    // ----- 2. Connect TCP socket to the Icecast server -----
+    auto sock = std::make_unique<juce::StreamingSocket>();
+    if (! sock->connect (cfg.host, cfg.port, 5000 /* ms timeout */))
     {
-        setError ("shout_new() a échoué");
+        setError ("connexion TCP impossible vers " + cfg.host + ":" + juce::String (cfg.port));
         lame_close (lame); lameCtx = nullptr;
         return false;
     }
 
-    shout_set_host     (shout, cfg.host.toRawUTF8());
-    shout_set_port     (shout, static_cast<unsigned short> (cfg.port));
-    shout_set_user     (shout, cfg.user.toRawUTF8());
-    shout_set_password (shout, cfg.password.toRawUTF8());
-    shout_set_mount    (shout, cfg.mount.toRawUTF8());
-    shout_set_format   (shout, SHOUT_FORMAT_MP3);
-    shout_set_protocol (shout, SHOUT_PROTOCOL_HTTP);    // Icecast 2
+    // ----- 3. Send Icecast SOURCE headers -----
+    // Icecast 2.x accepts the classic SOURCE method over HTTP/1.0.
+    const auto credsB64 = juce::Base64::toBase64 (cfg.user + ":" + cfg.password);
 
-    // TLS auto-negotiation : libshout tries TLS first, falls back to plain HTTP.
-    // Required for Infomaniak streams that mandate HTTPS; harmless on plain Icecast.
-    // If libshout was compiled without OpenSSL this is a silent no-op.
-   #ifdef SHOUT_TLS_AUTO
-    shout_set_tls (shout, SHOUT_TLS_AUTO);
-   #endif
+    juce::String headers;
+    headers << "SOURCE " << cfg.mount << " HTTP/1.0\r\n"
+            << "Host: "          << cfg.host << ":" << cfg.port << "\r\n"
+            << "Authorization: Basic " << credsB64 << "\r\n"
+            << "User-Agent: UG6Broadcaster/0.3\r\n"
+            << "Content-Type: audio/mpeg\r\n"
+            << "ice-name: "      << cfg.streamName  << "\r\n"
+            << "ice-genre: "     << cfg.streamGenre << "\r\n"
+            << "ice-bitrate: "   << cfg.bitrateKbps << "\r\n"
+            << "ice-public: 0\r\n"
+            << "ice-audio-info: bitrate=" << cfg.bitrateKbps
+                              << ";channels=2"
+                              << ";samplerate=" << static_cast<int> (sampleRate) << "\r\n"
+            << "\r\n";
 
-    shout_set_name        (shout, cfg.streamName.toRawUTF8());
-    shout_set_genre       (shout, cfg.streamGenre.toRawUTF8());
-    shout_set_audio_info  (shout, SHOUT_AI_BITRATE,    juce::String (cfg.bitrateKbps).toRawUTF8());
-    shout_set_audio_info  (shout, SHOUT_AI_SAMPLERATE, juce::String (static_cast<int> (sampleRate)).toRawUTF8());
-    shout_set_audio_info  (shout, SHOUT_AI_CHANNELS,   "2");
+    const auto headersUtf8 = headers.toRawUTF8();
+    const auto headersLen  = static_cast<int> (headers.getNumBytesAsUTF8());
 
-    if (shout_open (shout) != SHOUTERR_SUCCESS)
+    if (sock->write (headersUtf8, headersLen) != headersLen)
     {
-        setError (juce::String ("shout_open : ") + shout_get_error (shout));
-        shout_free (shout);
-        lame_close (lame);
-        shoutCtx = nullptr;
-        lameCtx  = nullptr;
+        setError ("échec écriture des headers SOURCE");
+        sock.reset();
+        lame_close (lame); lameCtx = nullptr;
         return false;
     }
 
-    shoutCtx = shout;
+    // ----- 4. Read the Icecast response (expect HTTP/1.0 200 OK) -----
+    if (sock->waitUntilReady (true /*read*/, 5000) <= 0)
+    {
+        setError ("aucune réponse du serveur Icecast (timeout 5 s)");
+        sock.reset();
+        lame_close (lame); lameCtx = nullptr;
+        return false;
+    }
+
+    char respBuf[1024] = {};
+    const int n = sock->read (respBuf, sizeof (respBuf) - 1, true);
+    if (n <= 0)
+    {
+        setError ("connexion Icecast fermée pendant la lecture de la réponse");
+        sock.reset();
+        lame_close (lame); lameCtx = nullptr;
+        return false;
+    }
+
+    const juce::String response (respBuf, static_cast<size_t> (n));
+    if (! response.startsWith ("HTTP/1.0 200") && ! response.startsWith ("HTTP/1.1 200"))
+    {
+        const auto firstLine = response.upToFirstOccurrenceOf ("\r\n", false, false);
+        setError ("serveur Icecast : " + firstLine);
+        sock.reset();
+        lame_close (lame); lameCtx = nullptr;
+        return false;
+    }
+
+    socket = std::move (sock);
     return true;
 }
 
 void BroadcastSender::closeConnection()
 {
-    if (shoutCtx != nullptr)
+    if (socket != nullptr)
     {
-        shout_close (static_cast<shout_t*> (shoutCtx));
-        shout_free  (static_cast<shout_t*> (shoutCtx));
-        shoutCtx = nullptr;
+        socket->close();
+        socket.reset();
     }
     if (lameCtx != nullptr)
     {
@@ -232,7 +240,7 @@ void BroadcastSender::senderThreadLoop()
 {
     juce::Thread::setCurrentThreadName ("UG6BroadcastSender");
 
-    constexpr int kChunkSamples = 1152; // 1 MP3 frame
+    constexpr int kChunkSamples = 1152; // 1 MP3 frame at standard rates
     std::vector<unsigned char> mp3Buf (static_cast<size_t> (kChunkSamples) * 5 + 7200);
     std::vector<float> left  (kChunkSamples);
     std::vector<float> right (kChunkSamples);
@@ -242,11 +250,10 @@ void BroadcastSender::senderThreadLoop()
     while (running.load())
     {
         const bool wantConnect = wantsToBeConnected.load();
-        const bool currentlyConnected = (status.load() == Status::Connected);
 
-        // Detect config change and force a reconnect cycle.
+        // Detect config change → force a clean reconnect cycle.
         const int epoch = configEpoch.load();
-        if (epoch != lastSeenConfigEpoch && currentlyConnected)
+        if (epoch != lastSeenConfigEpoch && status.load() == Status::Connected)
         {
             closeConnection();
             status.store (Status::Disconnected);
@@ -271,13 +278,13 @@ void BroadcastSender::senderThreadLoop()
             }
         }
 
-        if (! wantConnect && (shoutCtx != nullptr || lameCtx != nullptr))
+        if (! wantConnect && (socket != nullptr || lameCtx != nullptr))
         {
             closeConnection();
             status.store (Status::Disconnected);
         }
 
-        // Drain → encode → send
+        // Drain → encode → write
         if (status.load() == Status::Connected && fifo.getNumReady() >= kChunkSamples)
         {
             int s1, sz1, s2, sz2;
@@ -286,14 +293,14 @@ void BroadcastSender::senderThreadLoop()
             int filled = 0;
             if (sz1 > 0)
             {
-                std::memcpy (left.data()  + filled, ringBuffer.getReadPointer (0) + s1, sz1 * sizeof (float));
-                std::memcpy (right.data() + filled, ringBuffer.getReadPointer (1) + s1, sz1 * sizeof (float));
+                std::memcpy (left.data()  + filled, ringBuffer.getReadPointer (0) + s1, static_cast<size_t> (sz1) * sizeof (float));
+                std::memcpy (right.data() + filled, ringBuffer.getReadPointer (1) + s1, static_cast<size_t> (sz1) * sizeof (float));
                 filled += sz1;
             }
             if (sz2 > 0)
             {
-                std::memcpy (left.data()  + filled, ringBuffer.getReadPointer (0) + s2, sz2 * sizeof (float));
-                std::memcpy (right.data() + filled, ringBuffer.getReadPointer (1) + s2, sz2 * sizeof (float));
+                std::memcpy (left.data()  + filled, ringBuffer.getReadPointer (0) + s2, static_cast<size_t> (sz2) * sizeof (float));
+                std::memcpy (right.data() + filled, ringBuffer.getReadPointer (1) + s2, static_cast<size_t> (sz2) * sizeof (float));
                 filled += sz2;
             }
             fifo.finishedRead (sz1 + sz2);
@@ -314,10 +321,9 @@ void BroadcastSender::senderThreadLoop()
 
             if (mp3Bytes > 0)
             {
-                auto* sh = static_cast<shout_t*> (shoutCtx);
-                if (shout_send (sh, mp3Buf.data(), mp3Bytes) != SHOUTERR_SUCCESS)
+                if (socket->write (mp3Buf.data(), mp3Bytes) != mp3Bytes)
                 {
-                    setError (juce::String ("shout_send : ") + shout_get_error (sh));
+                    setError ("connexion Icecast perdue (write a échoué)");
                     closeConnection();
                     status.store (Status::Error);
                     reconnects.fetch_add (1);
@@ -326,8 +332,9 @@ void BroadcastSender::senderThreadLoop()
                     continue;
                 }
                 bytesSent.fetch_add (mp3Bytes);
-                shout_sync (sh);   // libshout paces real-time
             }
+            // Real-time pacing is handled implicitly : we only get audio at real-time rate
+            // from the audio callback, so the FIFO refills at the same speed.
         }
         else
         {
@@ -338,7 +345,7 @@ void BroadcastSender::senderThreadLoop()
     closeConnection();
 }
 
-#else  // ---------- stubs when LAME / libshout aren't available ----------
+#else  // ---------- stub when LAME isn't available ----------
 
 bool BroadcastSender::openConnection()  { return false; }
 void BroadcastSender::closeConnection() {}
