@@ -35,6 +35,19 @@ FetchContent_Declare(
 )
 
 # cpp-httplib — single-header HTTP server, supports SSE via chunked content provider.
+# IMPORTANT: cpp-httplib auto-detects OpenSSL / Brotli / ZLIB on the host and links
+# them in by default. We don't use HTTPS (control plane is loopback only), so we
+# force all optional features OFF — keeps the binary free of libssl-3 / libcrypto
+# imports, which would otherwise crash on Win7 (OpenSSL 3 dropped Win7 support).
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_OPENSSL          OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE  OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_BROTLI           OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE    OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_ZLIB             OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZSTD_IF_AVAILABLE    OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_ZSTD             OFF CACHE BOOL "" FORCE)
+
 FetchContent_Declare(
     httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
