@@ -59,7 +59,7 @@ jobs:
       - name: vcpkg install LAME + libshout
         shell: pwsh
         run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows --x-feature=core
+          & "$env:VCPKG_ROOT\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows
 
       - name: Configure CMake (vcpkg toolchain)
         shell: pwsh
