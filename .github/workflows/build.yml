@@ -91,37 +91,13 @@ jobs:
           Copy-Item "$vcpkgBin\*.dll" $binDir -Force
           Get-ChildItem $binDir
 
-      - name: Write README into the artifact
+      - name: Copy README + build info into the artifact
         shell: pwsh
         run: |
           $binDir = (Get-ChildItem -Recurse -File -Include "UG6Broadcaster.exe" build\UG6Broadcaster_artefacts | Select-Object -First 1).Directory.FullName
-          $readme = @"
-UG6 Broadcaster — bundle Windows portable
-==========================================
-
-Pour installer :
-1. Installe une fois pour toutes Visual C++ 2015-2022 Redistributable (x64) :
-   https://aka.ms/vs/17/release/vc_redist.x64.exe
-2. Dézippe ce dossier où tu veux (ex C:\UG6\).
-3. Double-clique UG6Broadcaster.exe.
-4. Ouvre http://127.0.0.1:8000 dans Chrome ou Edge.
-
-Pour 10 radios sur la meme machine, lance plusieurs instances :
-   UG6Broadcaster.exe --port=8000
-   UG6Broadcaster.exe --port=8001
-   ... (jusqu'a 8009)
-
-Chaque instance gardera sa propre config Icecast dans
-%APPDATA%\UG6Broadcaster\instances\config-port-XXXX.json
-
-Build info :
-- Commit  : $env:GITHUB_SHA
-- Date    : $(Get-Date -Format 'yyyy-MM-dd HH:mm')
-- Runner  : windows-2022
-- Bitness : x64
-- Compat  : Win7 SP1 / Win10 / Win11 (theorique pour Win7, valide pour Win10+)
-"@
-          Set-Content -Path "$binDir\README.txt" -Value $readme -Encoding UTF8
+          Copy-Item windows\README-WINDOWS.txt "$binDir\README.txt" -Force
+          $buildInfo = "Build commit: $env:GITHUB_SHA`r`nBuilt on: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`nRunner: windows-2022 x64"
+          Set-Content -Path "$binDir\BUILD-INFO.txt" -Value $buildInfo -Encoding UTF8
           Get-ChildItem $binDir
 
       - name: Upload artifact
