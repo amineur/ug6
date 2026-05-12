@@ -1,0 +1,132 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS — for local dev / Apple Silicon + Intel
+  # ---------------------------------------------------------------------------
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LAME + libshout
+        run: brew install lame libshout
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+          -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UG6Broadcaster-macOS
+          path: build/UG6Broadcaster_artefacts/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows — produces a portable .exe bundle (UG6 + DLLs) for Win7+ / Win10 / Win11.
+  # Uses vcpkg to fetch LAME + libshout + their transitive deps (ogg, vorbis,
+  # speex, theora). All DLLs are copied next to UG6Broadcaster.exe so the user
+  # just unzips and runs.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-2022
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: c8696863d371ab7f46e213d8f5ca923c4aef2a00
+
+      - name: vcpkg install LAME + libshout
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install mp3lame:x64-windows libshout:x64-windows --x-feature=core
+
+      - name: Configure CMake (vcpkg toolchain)
+        shell: pwsh
+        run: |
+          cmake -B build -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Locate built binary
+        shell: pwsh
+        run: |
+          Write-Host "==> Built artefacts tree:"
+          Get-ChildItem -Recurse build\UG6Broadcaster_artefacts | Select-Object FullName
+
+      - name: Bundle runtime DLLs next to the .exe
+        shell: pwsh
+        run: |
+          $binDir = "build\UG6Broadcaster_artefacts\Release"
+          if (-not (Test-Path $binDir)) {
+            $binDir = (Get-ChildItem -Recurse -File -Include "UG6Broadcaster.exe" build\UG6Broadcaster_artefacts | Select-Object -First 1).Directory.FullName
+            Write-Host "Real binary directory: $binDir"
+          }
+          $vcpkgBin = "$env:VCPKG_ROOT\installed\x64-windows\bin"
+          Write-Host "Copying DLLs from $vcpkgBin to $binDir"
+          Copy-Item "$vcpkgBin\*.dll" $binDir -Force
+          Get-ChildItem $binDir
+
+      - name: Write README into the artifact
+        shell: pwsh
+        run: |
+          $binDir = (Get-ChildItem -Recurse -File -Include "UG6Broadcaster.exe" build\UG6Broadcaster_artefacts | Select-Object -First 1).Directory.FullName
+          $readme = @"
+UG6 Broadcaster — bundle Windows portable
+==========================================
+
+Pour installer :
+1. Installe une fois pour toutes Visual C++ 2015-2022 Redistributable (x64) :
+   https://aka.ms/vs/17/release/vc_redist.x64.exe
+2. Dézippe ce dossier où tu veux (ex C:\UG6\).
+3. Double-clique UG6Broadcaster.exe.
+4. Ouvre http://127.0.0.1:8000 dans Chrome ou Edge.
+
+Pour 10 radios sur la meme machine, lance plusieurs instances :
+   UG6Broadcaster.exe --port=8000
+   UG6Broadcaster.exe --port=8001
+   ... (jusqu'a 8009)
+
+Chaque instance gardera sa propre config Icecast dans
+%APPDATA%\UG6Broadcaster\instances\config-port-XXXX.json
+
+Build info :
+- Commit  : $env:GITHUB_SHA
+- Date    : $(Get-Date -Format 'yyyy-MM-dd HH:mm')
+- Runner  : windows-2022
+- Bitness : x64
+- Compat  : Win7 SP1 / Win10 / Win11 (theorique pour Win7, valide pour Win10+)
+"@
+          Set-Content -Path "$binDir\README.txt" -Value $readme -Encoding UTF8
+          Get-ChildItem $binDir
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UG6Broadcaster-Windows
+          path: build/UG6Broadcaster_artefacts/
+          if-no-files-found: error

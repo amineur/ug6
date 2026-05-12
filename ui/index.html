@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UG6 Broadcaster</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    body { background: radial-gradient(ellipse at top, #1a1a1a 0%, #0a0a0a 60%, #050505 100%); }
+    .vu-fill, .gr-fill { transition: width 50ms linear, height 50ms linear; }
+    .on-air-pulse { animation: pulse-red 1.4s ease-in-out infinite; }
+    @keyframes pulse-red {
+      0%, 100% { box-shadow: 0 0 18px 2px rgba(239, 68, 68, 0.55); }
+      50%      { box-shadow: 0 0 44px 8px rgba(239, 68, 68, 0.85); }
+    }
+    input[type=range] { -webkit-appearance: none; height: 4px; border-radius: 9999px; background: #1f2937; }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 14px; height: 14px; border-radius: 9999px;
+      background: #e5e7eb; border: 1px solid #374151; cursor: pointer;
+    }
+    select { background: #0f1115; border: 1px solid #1f2937; color: #d1d5db; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+    select:focus { outline: 1px solid #f59e0b; }
+    .mono { font-feature-settings: "tnum" 1, "zero" 1; }
+    .panel { background: rgba(15, 17, 21, 0.7); border: 1px solid rgba(31, 41, 55, 0.7); border-radius: 6px; }
+    .panel h3 { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: #9ca3af; font-weight: 600; }
+    .led { width: 8px; height: 8px; border-radius: 9999px; }
+    .led-on  { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+    .led-off { background: #1f2937; }
+    .pill { font-size: 10px; padding: 2px 8px; border-radius: 9999px; letter-spacing: 0.1em; text-transform: uppercase; }
+    /* Vertical meter */
+    .vmeter { width: 8px; height: 100%; background: #0a0a0a; position: relative; overflow: hidden; border-radius: 2px; border: 1px solid #1f2937; }
+    .vmeter > div { position: absolute; bottom: 0; left: 0; right: 0; transition: height 50ms linear; }
+    .hmeter { height: 8px; background: #0a0a0a; position: relative; overflow: hidden; border-radius: 2px; border: 1px solid #1f2937; }
+    .hmeter > div { position: absolute; top: 0; left: 0; bottom: 0; transition: width 50ms linear; }
+    /* GR meter (downward) */
+    .grmeter { width: 8px; height: 100%; background: #0a0a0a; position: relative; overflow: hidden; border-radius: 2px; border: 1px solid #1f2937; }
+    .grmeter > div { position: absolute; top: 0; left: 0; right: 0; background: #fbbf24; transition: height 50ms linear; }
+  </style>
+</head>
+
+<body class="text-gray-200 min-h-screen p-4 selection:bg-amber-500 selection:text-black" x-data="app()" x-init="init()">
+  <div class="max-w-7xl mx-auto space-y-3">
+
+    <!-- ============================ HEADER ============================ -->
+    <header class="flex items-center justify-between border-b border-gray-800 pb-2">
+      <div class="flex items-baseline gap-4">
+        <h1 class="text-xl font-black tracking-tight">UG6 <span class="text-amber-500">Broadcaster</span></h1>
+        <span class="text-[10px] text-gray-500 mono"
+              x-text="`v0.2 · ${state.device.in} → ${state.device.out} · ${(state.device.sampleRate/1000).toFixed(1)} kHz`"></span>
+      </div>
+      <div class="flex items-center gap-3 text-[11px] text-gray-500 mono">
+        <span :class="meterStream === 'open' ? 'text-green-400' : 'text-amber-400'"
+              x-text="meterStream === 'open' ? '● live' : '○ reconnect'"></span>
+        <span x-text="'port ' + window.location.port"></span>
+      </div>
+    </header>
+
+    <!-- ============================ TOP CONTROL BAR ============================ -->
+    <section class="grid grid-cols-12 gap-3 items-stretch">
+
+      <!-- ON AIR -->
+      <div class="col-span-3 panel p-3 flex flex-col items-center justify-center">
+        <button @click="toggleOnAir()"
+                :class="state.onAir ? 'bg-red-600 text-white on-air-pulse' : 'bg-gray-900 text-gray-600 border border-gray-800 hover:border-gray-700'"
+                class="w-full py-4 rounded text-2xl font-black tracking-[0.3em] transition-colors">
+          ON AIR
+        </button>
+        <p class="mt-2 text-[10px] tracking-widest uppercase mono"
+           :class="state.onAir ? 'text-red-400' : 'text-gray-600'"
+           x-text="state.onAir ? '● live signal' : '○ standby'"></p>
+      </div>
+
+      <!-- SOURCE + BYPASS -->
+      <div class="col-span-3 panel p-3 space-y-2">
+        <h3>Source</h3>
+        <div class="grid grid-cols-3 gap-1">
+          <button @click="setSource('generator')"
+                  :class="state.source === 'generator' ? 'bg-amber-500 text-black' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'"
+                  class="py-2 text-[11px] font-semibold rounded">TEST</button>
+          <button @click="setSource('input')"
+                  :class="state.source === 'input' ? 'bg-amber-500 text-black' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'"
+                  class="py-2 text-[11px] font-semibold rounded">AUDIO IN</button>
+          <button @click="setSource('file')"
+                  :class="state.source === 'file' ? 'bg-amber-500 text-black' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'"
+                  class="py-2 text-[11px] font-semibold rounded">FICHIER</button>
+        </div>
+        <button @click="setParam('bypass', state.dsp.bypass ? 0 : 1)"
+                :class="state.dsp.bypass ? 'bg-yellow-600 text-black' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'"
+                class="w-full py-2 text-xs font-semibold rounded tracking-wider">
+          <span x-text="state.dsp.bypass ? '⚠ DSP BYPASS' : 'DSP ACTIVE'"></span>
+        </button>
+      </div>
+
+      <!-- DEVICES -->
+      <div class="col-span-3 panel p-3 space-y-2">
+        <h3>Devices</h3>
+        <div>
+          <label class="text-[10px] text-gray-500 mono block mb-1">Input</label>
+          <select class="w-full" @change="setInputDevice($event.target.value)">
+            <option value="" :selected="!state.device.in || state.device.in === '<default>'">— défaut système —</option>
+            <template x-for="d in devices.in" :key="d">
+              <option :value="d" :selected="state.device.in === d" x-text="d"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="text-[10px] text-gray-500 mono block mb-1">Output</label>
+          <select class="w-full" @change="setOutputDevice($event.target.value)">
+            <option value="" :selected="!state.device.out || state.device.out === '<default>'">— défaut système —</option>
+            <template x-for="d in devices.out" :key="d">
+              <option :value="d" :selected="state.device.out === d" x-text="d"></option>
+            </template>
+          </select>
+        </div>
+      </div>
+
+      <!-- PRESETS -->
+      <div class="col-span-3 panel p-3 space-y-2">
+        <h3>Presets</h3>
+        <div class="grid grid-cols-2 gap-1">
+          <button @click="applyPreset('bypass')"   class="py-1.5 text-[11px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded">Bypass</button>
+          <button @click="applyPreset('music_fm')" class="py-1.5 text-[11px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded">Music FM</button>
+          <button @click="applyPreset('talk')"     class="py-1.5 text-[11px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded">Talk</button>
+          <button @click="applyPreset('urban_pop')"class="py-1.5 text-[11px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded">Urban Pop</button>
+          <button @click="applyPreset('leveler')"  class="py-1.5 text-[11px] bg-amber-700/30 hover:bg-amber-700/50 text-amber-300 rounded col-span-2" title="Rattrapage de loudness inter-titres">📶 Loudness leveler</button>
+        </div>
+
+        <!-- Custom user presets -->
+        <div class="pt-2 border-t border-gray-800 space-y-1">
+          <div class="text-[9px] text-gray-500 uppercase tracking-wider">Mes presets</div>
+          <div class="space-y-0.5 max-h-20 overflow-y-auto" x-show="userPresets.length > 0">
+            <template x-for="p in userPresets" :key="p">
+              <div class="flex gap-0.5">
+                <button @click="loadUserPreset(p)"
+                        class="flex-1 py-1 px-2 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-left truncate"
+                        x-text="p"></button>
+                <button @click="deleteUserPreset(p)"
+                        title="Supprimer"
+                        class="px-1.5 py-1 text-[10px] bg-red-900/40 hover:bg-red-900/60 text-red-400 rounded">✕</button>
+              </div>
+            </template>
+          </div>
+          <p x-show="userPresets.length === 0" class="text-[9px] text-gray-600 mono italic">aucun preset perso pour l'instant</p>
+          <div class="flex gap-1">
+            <input type="text" x-model="newPresetName" placeholder="nom du preset"
+                   @keyup.enter="saveUserPreset()"
+                   class="flex-1 bg-gray-800 px-2 py-1 text-[11px] rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
+            <button @click="saveUserPreset()"
+                    :disabled="!newPresetName.trim()"
+                    :class="newPresetName.trim() ? 'bg-amber-500 text-black' : 'bg-gray-700 text-gray-500'"
+                    class="px-3 py-1 text-[11px] font-bold rounded transition-colors">💾</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ FILE PLAYER (only when source=file) ============================ -->
+    <section x-show="state.source === 'file'" class="panel p-3">
+      <div class="flex items-center justify-between mb-2">
+        <h3>Lecteur de fichier audio</h3>
+        <span class="text-[10px] text-gray-500 mono">MP3 · WAV · AIFF · FLAC · OGG</span>
+      </div>
+
+      <!-- Drag-and-drop zone -->
+      <div @dragover.prevent="dragHover = true"
+           @dragleave.prevent="dragHover = false"
+           @drop.prevent="handleDrop($event)"
+           :class="dragHover ? 'border-amber-500 bg-amber-500/10' : (state.file.loaded ? 'border-green-700/60 bg-green-900/10' : 'border-gray-700')"
+           class="border-2 border-dashed rounded p-4 text-center transition-colors cursor-pointer"
+           @click="$refs.fileInput.click()">
+        <input type="file" x-ref="fileInput" class="hidden" accept="audio/*"
+               @change="handleFileSelect($event)" />
+        <template x-if="!state.file.loaded">
+          <div>
+            <div class="text-xs text-gray-400 font-semibold uppercase tracking-widest">Glisse un fichier audio ici</div>
+            <div class="text-[10px] text-gray-600 mt-1">ou clique pour parcourir — MP3, WAV, AIFF, FLAC</div>
+          </div>
+        </template>
+        <template x-if="state.file.loaded">
+          <div>
+            <div class="text-xs text-green-400 font-semibold truncate" x-text="state.file.name"></div>
+            <div class="text-[10px] text-gray-500 mt-1" x-text="'durée : ' + timeStr(state.file.duration) + ' · clique pour changer'"></div>
+          </div>
+        </template>
+        <template x-if="uploadProgress > 0 && uploadProgress < 100">
+          <div class="mt-2 text-[10px] text-amber-400 mono">Upload : <span x-text="uploadProgress + '%'"></span></div>
+        </template>
+      </div>
+
+      <!-- Transport controls -->
+      <div class="mt-3 grid grid-cols-12 gap-2 items-center" x-show="state.file.loaded">
+        <button @click="filePlay()"
+                :class="state.file.playing ? 'bg-green-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'"
+                class="col-span-2 py-2 text-xs font-bold rounded">▶ PLAY</button>
+        <button @click="filePause()"
+                class="col-span-2 py-2 text-xs font-bold rounded bg-gray-800 hover:bg-gray-700 text-gray-300">⏸ PAUSE</button>
+        <button @click="fileStop()"
+                class="col-span-2 py-2 text-xs font-bold rounded bg-gray-800 hover:bg-gray-700 text-gray-300">⏹ STOP</button>
+        <button @click="fileLoop(!state.file.looping)"
+                :class="state.file.looping ? 'bg-amber-500 text-black' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'"
+                class="col-span-2 py-2 text-xs font-bold rounded">🔁 LOOP</button>
+        <div class="col-span-4 text-right text-[11px] mono text-gray-400">
+          <span x-text="timeStr(state.file.position)"></span> / <span x-text="timeStr(state.file.duration)"></span>
+        </div>
+        <!-- Progress + seek -->
+        <input class="col-span-12 mt-1 w-full accent-amber-500"
+               type="range" min="0" :max="state.file.duration || 1" step="0.1"
+               :value="state.file.position"
+               @input="fileSeek($event.target.value)" />
+      </div>
+
+      <p class="mt-2 text-[10px] text-gray-600 mono">
+        Le signal du fichier traverse toute la chaîne DSP. ON AIR ▶ tu entends le résultat traité sortir des HP.
+        Bouge les sliders ou clique les presets pendant la lecture pour entendre la différence.
+      </p>
+    </section>
+
+    <!-- ============================ TEST GEN (only when source=generator) ============================ -->
+    <section x-show="state.source === 'generator'" class="panel p-3">
+      <div class="flex items-center justify-between mb-2">
+        <h3>Générateur de test 1 kHz</h3>
+        <span class="text-[10px] text-amber-500 mono">⚠ TEST TONE — bascule sur AUDIO IN pour traiter ta source réelle</span>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <div class="flex justify-between text-[11px] mb-1"><span class="text-gray-500">Freq</span><span class="mono text-amber-400" x-text="state.gen.freqHz.toFixed(0) + ' Hz'"></span></div>
+          <input type="range" min="20" max="20000" step="1" :value="state.gen.freqHz" @input="setGenFreq($event.target.value)" class="w-full accent-amber-500" />
+        </div>
+        <div>
+          <div class="flex justify-between text-[11px] mb-1"><span class="text-gray-500">Niveau</span><span class="mono text-green-400" x-text="state.gen.gainDb.toFixed(1) + ' dB'"></span></div>
+          <input type="range" min="-60" max="6" step="0.1" :value="state.gen.gainDb" @input="setGenGain($event.target.value)" class="w-full accent-green-500" />
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ MAIN DSP GRID ============================ -->
+    <section class="grid grid-cols-12 gap-3">
+
+      <!-- ===================== Big I/O METERS (left) ===================== -->
+      <div class="col-span-2 panel p-3">
+        <h3 class="mb-2">In</h3>
+        <div class="flex gap-2 h-48 mb-3">
+          <div class="vmeter flex-1"><div :class="meterColor(state.dsp.meters.in.peakL)" :style="'height:' + meterPct(state.dsp.meters.in.peakL) + '%'"></div></div>
+          <div class="vmeter flex-1"><div :class="meterColor(state.dsp.meters.in.peakR)" :style="'height:' + meterPct(state.dsp.meters.in.peakR) + '%'"></div></div>
+          <div class="text-[9px] text-gray-500 mono flex flex-col justify-between">
+            <span>0</span><span>-12</span><span>-24</span><span>-40</span><span>-60</span>
+          </div>
+        </div>
+        <div class="text-center text-[10px] text-gray-500 mono space-y-0.5">
+          <div>L <span class="text-gray-300" x-text="dbStr(state.dsp.meters.in.peakL)"></span></div>
+          <div>R <span class="text-gray-300" x-text="dbStr(state.dsp.meters.in.peakR)"></span></div>
+        </div>
+
+        <h3 class="mt-4 mb-2">Out</h3>
+        <div class="flex gap-2 h-48 mb-3">
+          <div class="vmeter flex-1"><div :class="meterColor(state.dsp.meters.out.peakL)" :style="'height:' + meterPct(state.dsp.meters.out.peakL) + '%'"></div></div>
+          <div class="vmeter flex-1"><div :class="meterColor(state.dsp.meters.out.peakR)" :style="'height:' + meterPct(state.dsp.meters.out.peakR) + '%'"></div></div>
+          <div class="text-[9px] text-gray-500 mono flex flex-col justify-between">
+            <span>0</span><span>-12</span><span>-24</span><span>-40</span><span>-60</span>
+          </div>
+        </div>
+        <div class="text-center text-[10px] text-gray-500 mono space-y-0.5">
+          <div>L <span class="text-gray-300" x-text="dbStr(state.dsp.meters.out.peakL)"></span></div>
+          <div>R <span class="text-gray-300" x-text="dbStr(state.dsp.meters.out.peakR)"></span></div>
+        </div>
+      </div>
+
+      <!-- ===================== Center column: HPF + AGC + EQ + Multiband ===================== -->
+      <div class="col-span-10 space-y-3">
+
+        <!-- HPF + AGC ROW -->
+        <div class="grid grid-cols-2 gap-3">
+          <!-- HPF -->
+          <div class="panel p-3">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <h3>HPF · rumble filter</h3>
+                <button @click="setParam('hpf.on', state.dsp.hpf.on ? 0 : 1)"
+                        :class="state.dsp.hpf.on ? 'bg-green-600 text-white' : 'bg-gray-800 text-gray-500'"
+                        class="pill">ON</button>
+              </div>
+              <span class="text-[10px] mono text-gray-400" x-text="state.dsp.hpf.freqHz.toFixed(0) + ' Hz'"></span>
+            </div>
+            <input type="range" min="20" max="200" step="1" :value="state.dsp.hpf.freqHz" @input="setParam('hpf.freqHz', $event.target.value)" class="w-full accent-amber-500" />
+            <div class="flex justify-between text-[9px] text-gray-600 mt-1 mono"><span>20</span><span>50</span><span>100</span><span>200 Hz</span></div>
+          </div>
+
+          <!-- AGC -->
+          <div class="panel p-3">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <h3>AGC · slow leveler</h3>
+                <button @click="setParam('agc.on', state.dsp.agc.on ? 0 : 1)"
+                        :class="state.dsp.agc.on ? 'bg-green-600 text-white' : 'bg-gray-800 text-gray-500'"
+                        class="pill">ON</button>
+              </div>
+              <span class="text-[10px] mono text-amber-400" x-text="'GR ' + state.dsp.agc.gr.toFixed(1) + ' dB'"></span>
+            </div>
+            <div class="grid grid-cols-5 gap-2 text-[10px]">
+              <div>
+                <div class="text-gray-500">Thresh</div>
+                <div class="mono text-gray-300" x-text="state.dsp.agc.thresholdDb.toFixed(1)"></div>
+                <input type="range" min="-60" max="0" step="0.1" :value="state.dsp.agc.thresholdDb" @input="setParam('agc.thresholdDb', $event.target.value)" class="w-full accent-green-500 mt-1" />
+              </div>
+              <div>
+                <div class="text-gray-500">Ratio</div>
+                <div class="mono text-gray-300" x-text="state.dsp.agc.ratio.toFixed(1) + ':1'"></div>
+                <input type="range" min="1" max="20" step="0.1" :value="state.dsp.agc.ratio" @input="setParam('agc.ratio', $event.target.value)" class="w-full accent-green-500 mt-1" />
+              </div>
+              <div>
+                <div class="text-gray-500">Attack</div>
+                <div class="mono text-gray-300" x-text="state.dsp.agc.attackMs.toFixed(0) + 'ms'"></div>
+                <input type="range" min="10" max="2000" step="10" :value="state.dsp.agc.attackMs" @input="setParam('agc.attackMs', $event.target.value)" class="w-full accent-green-500 mt-1" />
+              </div>
+              <div>
+                <div class="text-gray-500">Release</div>
+                <div class="mono text-gray-300" x-text="state.dsp.agc.releaseMs.toFixed(0) + 'ms'"></div>
+                <input type="range" min="50" max="5000" step="50" :value="state.dsp.agc.releaseMs" @input="setParam('agc.releaseMs', $event.target.value)" class="w-full accent-green-500 mt-1" />
+              </div>
+              <div>
+                <div class="text-gray-500">Makeup</div>
+                <div class="mono text-gray-300" x-text="state.dsp.agc.makeupDb.toFixed(1)"></div>
+                <input type="range" min="0" max="24" step="0.1" :value="state.dsp.agc.makeupDb" @input="setParam('agc.makeupDb', $event.target.value)" class="w-full accent-green-500 mt-1" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- EQ 4 BANDES -->
+        <div class="panel p-3">
+          <h3 class="mb-2">EQ · 4 bandes</h3>
+          <div class="grid grid-cols-4 gap-3">
+            <template x-for="(band, idx) in state.dsp.eq" :key="idx">
+              <div class="bg-gray-900/40 border border-gray-800 rounded p-2 space-y-1">
+                <div class="flex justify-between items-center">
+                  <span class="text-[10px] text-gray-500 uppercase tracking-wider" x-text="idx === 0 ? 'Low-shelf' : idx === 3 ? 'High-shelf' : 'Peak ' + idx"></span>
+                  <button @click="setParam('eq.'+idx+'.on', band.on ? 0 : 1)"
+                          :class="band.on ? 'bg-green-600 text-white' : 'bg-gray-800 text-gray-500'"
+                          class="pill">ON</button>
+                </div>
+                <div class="text-[10px]">
+                  <div class="flex justify-between"><span class="text-gray-500">Freq</span><span class="mono text-gray-300" x-text="band.freq.toFixed(0) + ' Hz'"></span></div>
+                  <input type="range" min="20" max="20000" step="1" :value="band.freq" @input="setParam('eq.'+idx+'.freq', $event.target.value)" class="w-full accent-amber-500" />
+                </div>
+                <div class="text-[10px]">
+                  <div class="flex justify-between"><span class="text-gray-500">Gain</span><span class="mono" :class="band.gainDb > 0 ? 'text-amber-400' : band.gainDb < 0 ? 'text-sky-400' : 'text-gray-300'" x-text="(band.gainDb >= 0 ? '+' : '') + band.gainDb.toFixed(1) + ' dB'"></span></div>
+                  <input type="range" min="-18" max="18" step="0.1" :value="band.gainDb" @input="setParam('eq.'+idx+'.gainDb', $event.target.value)" class="w-full accent-amber-500" />
+                </div>
+                <div class="text-[10px]">
+                  <div class="flex justify-between"><span class="text-gray-500">Q</span><span class="mono text-gray-300" x-text="band.q.toFixed(2)"></span></div>
+                  <input type="range" min="0.2" max="10" step="0.05" :value="band.q" @input="setParam('eq.'+idx+'.q', $event.target.value)" class="w-full accent-amber-500" />
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- 6-BAND MULTIBAND COMPRESSOR -->
+        <div class="panel p-3">
+          <div class="flex items-center justify-between mb-2">
+            <h3>Multibande · 6 bandes Linkwitz-Riley</h3>
+            <span class="text-[9px] text-gray-600 mono">crossover : 100 · 300 · 800 · 2.5k · 8k Hz</span>
+          </div>
+          <div class="grid grid-cols-6 gap-2">
+            <template x-for="(c, idx) in state.dsp.comp" :key="idx">
+              <div class="bg-gray-900/40 border border-gray-800 rounded p-2 space-y-1">
+                <div class="text-center">
+                  <div class="text-[10px] font-bold text-amber-500 uppercase tracking-widest" x-text="'Bnd ' + (idx+1)"></div>
+                  <div class="text-[9px] text-gray-600 mono" x-text="bandLabel(idx)"></div>
+                </div>
+
+                <!-- GR meter -->
+                <div class="flex gap-1 items-end h-20">
+                  <div class="grmeter flex-1"><div :style="'height:' + grPct(c.gr) + '%'"></div></div>
+                  <div class="text-[9px] text-gray-600 mono flex flex-col justify-between h-full leading-none"><span>0</span><span>-6</span><span>-12</span><span>-18</span><span>-24</span></div>
+                </div>
+                <div class="text-center text-[10px] mono text-amber-400" x-text="c.gr.toFixed(1) + ' dB GR'"></div>
+
+                <div class="space-y-0.5 text-[9px]">
+                  <div class="flex justify-between"><span class="text-gray-500">Thr</span><span class="mono text-gray-300" x-text="c.thresholdDb.toFixed(1)"></span></div>
+                  <input type="range" min="-60" max="0" step="0.5" :value="c.thresholdDb" @input="setParam('comp.'+idx+'.thresholdDb', $event.target.value)" class="w-full accent-green-500" />
+
+                  <div class="flex justify-between"><span class="text-gray-500">Rat</span><span class="mono text-gray-300" x-text="c.ratio.toFixed(1)"></span></div>
+                  <input type="range" min="1" max="20" step="0.1" :value="c.ratio" @input="setParam('comp.'+idx+'.ratio', $event.target.value)" class="w-full accent-green-500" />
+
+                  <div class="flex justify-between"><span class="text-gray-500">Atk</span><span class="mono text-gray-300" x-text="c.attackMs.toFixed(0)+'ms'"></span></div>
+                  <input type="range" min="1" max="200" step="1" :value="c.attackMs" @input="setParam('comp.'+idx+'.attackMs', $event.target.value)" class="w-full accent-green-500" />
+
+                  <div class="flex justify-between"><span class="text-gray-500">Rel</span><span class="mono text-gray-300" x-text="c.releaseMs.toFixed(0)+'ms'"></span></div>
+                  <input type="range" min="10" max="1000" step="5" :value="c.releaseMs" @input="setParam('comp.'+idx+'.releaseMs', $event.target.value)" class="w-full accent-green-500" />
+
+                  <div class="flex justify-between"><span class="text-gray-500">MU</span><span class="mono text-gray-300" x-text="c.makeupDb.toFixed(1)"></span></div>
+                  <input type="range" min="-6" max="18" step="0.1" :value="c.makeupDb" @input="setParam('comp.'+idx+'.makeupDb', $event.target.value)" class="w-full accent-green-500" />
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- LIMITER + MASTERS -->
+        <div class="grid grid-cols-3 gap-3">
+          <div class="panel p-3 col-span-2">
+            <div class="flex items-center justify-between mb-2">
+              <h3>Brick-wall limiter</h3>
+              <span class="text-[10px] mono text-red-400" x-text="'GR ' + state.dsp.lim.gr.toFixed(1) + ' dB'"></span>
+            </div>
+            <div class="grid grid-cols-2 gap-3 text-[10px]">
+              <div>
+                <div class="flex justify-between"><span class="text-gray-500">Ceiling</span><span class="mono text-gray-300" x-text="state.dsp.lim.ceilingDb.toFixed(1) + ' dBTP'"></span></div>
+                <input type="range" min="-6" max="0" step="0.1" :value="state.dsp.lim.ceilingDb" @input="setParam('lim.ceilingDb', $event.target.value)" class="w-full accent-red-500 mt-1" />
+              </div>
+              <div>
+                <div class="flex justify-between"><span class="text-gray-500">Release</span><span class="mono text-gray-300" x-text="state.dsp.lim.releaseMs.toFixed(0) + ' ms'"></span></div>
+                <input type="range" min="5" max="500" step="5" :value="state.dsp.lim.releaseMs" @input="setParam('lim.releaseMs', $event.target.value)" class="w-full accent-red-500 mt-1" />
+              </div>
+            </div>
+          </div>
+
+          <div class="panel p-3">
+            <h3 class="mb-2">Master</h3>
+            <div class="space-y-2 text-[10px]">
+              <div>
+                <div class="flex justify-between"><span class="text-gray-500">Input gain</span><span class="mono text-gray-300" x-text="state.dsp.inputGainDb.toFixed(1) + ' dB'"></span></div>
+                <input type="range" min="-24" max="24" step="0.1" :value="state.dsp.inputGainDb" @input="setParam('inputGainDb', $event.target.value)" class="w-full accent-sky-500 mt-1" />
+              </div>
+              <div>
+                <div class="flex justify-between"><span class="text-gray-500">Output gain</span><span class="mono text-gray-300" x-text="state.dsp.outputGainDb.toFixed(1) + ' dB'"></span></div>
+                <input type="range" min="-24" max="24" step="0.1" :value="state.dsp.outputGainDb" @input="setParam('outputGainDb', $event.target.value)" class="w-full accent-sky-500 mt-1" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================ ICECAST BROADCAST ============================ -->
+    <section class="panel p-3">
+      <div class="flex items-center justify-between mb-2">
+        <h3>Diffusion Icecast · MP3 push</h3>
+        <div class="flex items-center gap-2 text-[11px] mono">
+          <div :class="bcLedClass()" class="led"></div>
+          <span :class="bcStatusTextClass()" x-text="state.broadcast.status"></span>
+          <span class="text-gray-600" x-show="state.broadcast.reconnects > 0" x-text="'· ' + state.broadcast.reconnects + ' reconnects'"></span>
+        </div>
+      </div>
+
+      <!-- Lib missing banner -->
+      <div x-show="!state.broadcast.available" class="bg-amber-900/30 border border-amber-700/50 rounded p-3 text-[11px] text-amber-300 mb-2 space-y-2">
+        <div class="font-semibold">⚠ Encoder MP3 / libshout indisponibles dans ce binaire.</div>
+        <div class="text-amber-200/80">Installe les libs Homebrew puis rebuild (2 commandes séparées) :</div>
+        <div>
+          <div class="text-[10px] text-amber-400/70 mb-0.5">1 · installer les libs (une fois)</div>
+          <pre class="bg-black/50 p-2 rounded font-mono text-[11px] text-amber-100 whitespace-pre-wrap select-all">brew install lame libshout</pre>
+        </div>
+        <div>
+          <div class="text-[10px] text-amber-400/70 mb-0.5">2 · quitter UG6 (Ctrl+C) puis rebuild</div>
+          <pre class="bg-black/50 p-2 rounded font-mono text-[11px] text-amber-100 whitespace-pre-wrap select-all">cd ~/Documents/Claude/Projects/UG6
+cmake -B build -G Xcode
+cmake --build build --config Release
+./build/UG6Broadcaster_artefacts/Release/UG6Broadcaster --port=8000</pre>
+        </div>
+        <div class="text-[10px] text-amber-400/70">
+          Tu dois voir « LAME found » et « libshout found » dans la sortie de cmake.
+        </div>
+      </div>
+
+      <div x-show="state.broadcast.available" class="grid grid-cols-12 gap-x-2 gap-y-2 text-[11px]">
+        <!-- Row 1: Host + Port + Mount + Bitrate -->
+        <div class="col-span-4">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Host</label>
+          <input type="text" x-model="bc.host" @blur="saveBroadcastConfig()"
+                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500"
+                 placeholder="icecast.exemple.com" />
+        </div>
+        <div class="col-span-2">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Port</label>
+          <input type="number" x-model.number="bc.port" @blur="saveBroadcastConfig()"
+                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
+        </div>
+        <div class="col-span-3">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Mount</label>
+          <input type="text" x-model="bc.mount" @blur="saveBroadcastConfig()"
+                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500"
+                 placeholder="/stream" />
+        </div>
+        <div class="col-span-3">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Bitrate</label>
+          <select x-model.number="bc.bitrate" @change="saveBroadcastConfig()" class="w-full">
+            <template x-for="b in [64,96,128,192,256,320]" :key="b">
+              <option :value="b" x-text="b + ' kbps'"></option>
+            </template>
+          </select>
+        </div>
+
+        <!-- Row 2: User + Password -->
+        <div class="col-span-3">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">User</label>
+          <input type="text" x-model="bc.user" @blur="saveBroadcastConfig()"
+                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500"
+                 placeholder="source" />
+        </div>
+        <div class="col-span-3">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Password</label>
+          <input type="password" x-model="bc.password" @blur="saveBroadcastConfig()"
+                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
+        </div>
+        <div class="col-span-4">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Nom du stream</label>
+          <input type="text" x-model="bc.name" @blur="saveBroadcastConfig()"
+                 class="w-full bg-gray-800 px-2 py-1 rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
+        </div>
+        <div class="col-span-2">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Genre</label>
+          <input type="text" x-model="bc.genre" @blur="saveBroadcastConfig()"
+                 class="w-full bg-gray-800 px-2 py-1 rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
+        </div>
+
+        <!-- Action row + stats -->
+        <div class="col-span-12 flex items-center justify-between pt-2 border-t border-gray-800 mt-1">
+          <div class="text-[10px] text-gray-500 mono">
+            <span x-show="state.broadcast.bytesSent > 0">📡 envoyé : <span class="text-gray-300" x-text="formatBytes(state.broadcast.bytesSent)"></span></span>
+          </div>
+          <div class="flex gap-1">
+            <button @click="bcConnect()"
+                    x-show="state.broadcast.status !== 'connecté' && state.broadcast.status !== 'connexion…'"
+                    class="px-5 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded tracking-wider">▶ CONNECTER</button>
+            <button @click="bcDisconnect()"
+                    x-show="state.broadcast.status === 'connecté' || state.broadcast.status === 'connexion…'"
+                    class="px-5 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded tracking-wider">⏹ DÉCONNECTER</button>
+          </div>
+        </div>
+
+        <!-- Error line -->
+        <div class="col-span-12 text-[10px] text-red-400 mono" x-show="state.broadcast.lastError">
+          ⚠ <span x-text="state.broadcast.lastError"></span>
+        </div>
+
+        <p class="col-span-12 text-[9px] text-gray-600 mono">
+          Quand connecté, le signal post-DSP est encodé en MP3 et poussé sur ton serveur Icecast.
+          ON AIR off ▶ silence dans le stream (la connexion reste ouverte).
+        </p>
+      </div>
+    </section>
+
+    <footer class="text-center text-[10px] text-gray-700 pt-2 mono">
+      UG6 Broadcaster v0.3 · DSP chain + presets utilisateur + push Icecast MP3
+    </footer>
+  </div>
+
+<script>
+function emptyDsp() {
+  return {
+    bypass: false, inputGainDb: 0, outputGainDb: 0,
+    hpf: { on: true, freqHz: 30 },
+    agc: { on: true, thresholdDb: -24, ratio: 2.5, attackMs: 500, releaseMs: 2000, makeupDb: 6, gr: 0 },
+    eq: Array.from({length: 4}, () => ({ on: true, freq: 1000, gainDb: 0, q: 1 })),
+    xover: [100, 300, 800, 2500, 8000],
+    comp: Array.from({length: 6}, () => ({ thresholdDb: -18, ratio: 2, attackMs: 20, releaseMs: 150, makeupDb: 0, gr: 0 })),
+    lim: { ceilingDb: -0.5, releaseMs: 60, gr: 0 },
+    meters: { in: {peakL:0, peakR:0, rmsL:0, rmsR:0}, out: {peakL:0, peakR:0, rmsL:0, rmsR:0} }
+  };
+}
+
+function app() {
+  return {
+    state: {
+      onAir: false,
+      source: 'generator',
+      gen: { freqHz: 1000, gainDb: -18 },
+      file: { loaded: false, playing: false, looping: true, name: '', position: 0, duration: 0 },
+      device: { in: '', out: '', sampleRate: 48000 },
+      broadcast: { available: false, status: 'déconnecté', reconnects: 0, bytesSent: 0, lastError: '',
+                   config: { host: 'localhost', port: 8000, mount: '/stream', user: 'source', password: '', name: 'UG6', genre: '', bitrate: 128 } },
+      dsp: emptyDsp()
+    },
+    devices: { in: [], out: [] },
+    userPresets: [],
+    newPresetName: '',
+    bc: { host: 'localhost', port: 8000, mount: '/stream', user: 'source', password: '', name: 'UG6 Broadcaster', genre: 'Various', bitrate: 128 },
+    bcSynced: false,
+    meterStream: 'closed',
+    dragHover: false,
+    uploadProgress: 0,
+    _es: null,
+
+    init() {
+      this.refreshState();
+      this.refreshDevices();
+      this.refreshUserPresets();
+      this.openMeterStream();
+    },
+
+    async refreshState() {
+      try {
+        const r = await fetch('/api/state');
+        const s = await r.json();
+        this.applyState(s);
+      } catch(e) {}
+    },
+
+    async refreshDevices() {
+      try {
+        const r = await fetch('/api/devices');
+        this.devices = await r.json();
+      } catch(e) {}
+    },
+
+    applyState(s) {
+      // Deep merge so we don't lose UI bindings when fields are missing
+      Object.assign(this.state, s);
+      if (s.dsp) Object.assign(this.state.dsp, s.dsp);
+      // Initial sync of the editable Icecast form from server config — only once,
+      // so the user's typing isn't clobbered by SSE updates.
+      if (!this.bcSynced && s.broadcast && s.broadcast.config) {
+        Object.assign(this.bc, s.broadcast.config);
+        this.bcSynced = true;
+      }
+    },
+
+    openMeterStream() {
+      this.meterStream = 'reconnect';
+      try { if (this._es) this._es.close(); } catch (e) {}
+      const es = new EventSource('/api/meters');
+      this._es = es;
+      es.onopen = () => { this.meterStream = 'open'; };
+      es.onmessage = (e) => {
+        try { this.applyState(JSON.parse(e.data)); } catch (err) {}
+      };
+      es.onerror = () => {
+        this.meterStream = 'reconnect';
+        try { es.close(); } catch (e) {}
+        setTimeout(() => this.openMeterStream(), 1000);
+      };
+    },
+
+    // --- master controls ---
+    async toggleOnAir()   { const r = await fetch('/api/onair',  { method:'POST', body: this.state.onAir ? 'false' : 'true' }); this.applyState(await r.json()); },
+    async setSource(s)    { const r = await fetch('/api/source', { method:'POST', body: s }); this.applyState(await r.json()); },
+    async setGenFreq(v)   { this.state.gen.freqHz = +v; await fetch('/api/gen/freq', { method:'POST', body: String(v) }); },
+    async setGenGain(v)   { this.state.gen.gainDb = +v; await fetch('/api/gen/gain', { method:'POST', body: String(v) }); },
+
+    // --- device selectors ---
+    async setInputDevice(name)  { const r = await fetch('/api/device/in',  { method:'POST', body: name }); if (r.ok) this.applyState(await r.json()); else alert('Erreur device input : ' + await r.text()); this.refreshDevices(); },
+    async setOutputDevice(name) { const r = await fetch('/api/device/out', { method:'POST', body: name }); if (r.ok) this.applyState(await r.json()); else alert('Erreur device output : ' + await r.text()); this.refreshDevices(); },
+
+    // --- generic DSP param setter ---
+    async setParam(path, value) {
+      const v = typeof value === 'number' ? value : parseFloat(value);
+      // Optimistic UI update — overwritten by SSE soon after
+      this.optimisticApply(path, v);
+      await fetch('/api/param', { method:'POST', headers: {'Content-Type':'application/json'},
+                                  body: JSON.stringify({ path: path, value: v }) });
+    },
+    optimisticApply(path, v) {
+      const parts = path.split('.');
+      let target = this.state.dsp;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const k = parts[i];
+        if (Array.isArray(target)) target = target[parseInt(k,10)];
+        else target = target[k];
+        if (!target) return;
+      }
+      const leaf = parts[parts.length - 1];
+      if (leaf === 'on' || leaf === 'bypass') target[leaf] = v > 0.5;
+      else target[leaf] = v;
+    },
+
+    async applyPreset(name) {
+      const r = await fetch('/api/preset', { method:'POST', body: name });
+      this.applyState(await r.json());
+    },
+
+    // --- User presets ---
+    async refreshUserPresets() {
+      try {
+        const r = await fetch('/api/presets');
+        const data = await r.json();
+        this.userPresets = data.presets || [];
+      } catch(e) {}
+    },
+    async saveUserPreset() {
+      const name = (this.newPresetName || '').trim();
+      if (!name) return;
+      const r = await fetch('/api/preset/save', { method:'POST', body: name });
+      if (r.ok) {
+        this.applyState(await r.json());
+        this.newPresetName = '';
+        this.refreshUserPresets();
+      } else {
+        alert('Erreur sauvegarde : ' + await r.text());
+      }
+    },
+    async loadUserPreset(name) {
+      const r = await fetch('/api/preset/load', { method:'POST', body: name });
+      if (r.ok) this.applyState(await r.json());
+      else alert('Erreur chargement : ' + await r.text());
+    },
+    async deleteUserPreset(name) {
+      if (!confirm('Supprimer le preset « ' + name + ' » ?')) return;
+      const r = await fetch('/api/preset/delete', { method:'POST', body: name });
+      if (r.ok) {
+        this.applyState(await r.json());
+        this.refreshUserPresets();
+      }
+    },
+
+    // --- Icecast broadcast ---
+    async saveBroadcastConfig() {
+      const payload = { ...this.bc };
+      try {
+        const r = await fetch('/api/broadcast/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (r.ok) this.applyState(await r.json());
+      } catch(e) {}
+    },
+    async bcConnect() {
+      // Always save current form first so the connection uses the latest config
+      await this.saveBroadcastConfig();
+      const r = await fetch('/api/broadcast/connect', { method:'POST' });
+      if (r.ok) this.applyState(await r.json());
+      else alert(await r.text());
+    },
+    async bcDisconnect() {
+      const r = await fetch('/api/broadcast/disconnect', { method:'POST' });
+      if (r.ok) this.applyState(await r.json());
+    },
+    bcLedClass() {
+      const s = this.state.broadcast.status;
+      if (s === 'connecté')    return 'led-on';
+      if (s === 'connexion…')  return 'bg-amber-400';
+      if (s === 'erreur')      return 'bg-red-500';
+      return 'led-off';
+    },
+    bcStatusTextClass() {
+      const s = this.state.broadcast.status;
+      if (s === 'connecté')    return 'text-green-400';
+      if (s === 'connexion…')  return 'text-amber-400';
+      if (s === 'erreur')      return 'text-red-400';
+      if (s === 'indisponible') return 'text-gray-500';
+      return 'text-gray-400';
+    },
+    formatBytes(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024*1024) return (n/1024).toFixed(0) + ' KB';
+      if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+      return (n/1024/1024/1024).toFixed(2) + ' GB';
+    },
+
+    // --- File player ---
+    handleDrop(ev) {
+      this.dragHover = false;
+      const file = ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if (file) this.uploadFile(file);
+    },
+    handleFileSelect(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      if (file) this.uploadFile(file);
+    },
+    uploadFile(file) {
+      const form = new FormData();
+      form.append('audio', file, file.name);
+
+      this.uploadProgress = 1;
+      const xhr = new XMLHttpRequest();
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) this.uploadProgress = Math.round((e.loaded / e.total) * 100);
+      };
+      xhr.onload = () => {
+        this.uploadProgress = 0;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { this.applyState(JSON.parse(xhr.responseText)); } catch(e) {}
+        } else {
+          alert('Upload échoué : ' + xhr.responseText);
+        }
+      };
+      xhr.onerror = () => { this.uploadProgress = 0; alert('Erreur réseau pendant l\'upload'); };
+      xhr.open('POST', '/api/file/upload');
+      xhr.send(form);
+    },
+    async filePlay()  { const r = await fetch('/api/file/play',  { method:'POST' }); this.applyState(await r.json()); },
+    async filePause() { const r = await fetch('/api/file/pause', { method:'POST' }); this.applyState(await r.json()); },
+    async fileStop()  { const r = await fetch('/api/file/stop',  { method:'POST' }); this.applyState(await r.json()); },
+    async fileLoop(b) { const r = await fetch('/api/file/loop',  { method:'POST', body: b ? 'true' : 'false' }); this.applyState(await r.json()); },
+    async fileSeek(s) { this.state.file.position = +s; await fetch('/api/file/seek', { method:'POST', body: String(s) }); },
+
+    timeStr(seconds) {
+      if (!seconds || isNaN(seconds)) return '0:00';
+      const s = Math.floor(seconds);
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return m + ':' + (r < 10 ? '0' + r : r);
+    },
+
+    // --- meter helpers ---
+    dbStr(lin) { if (lin < 1e-6) return '-∞'; return (20*Math.log10(lin)).toFixed(1)+' dB'; },
+    meterPct(lin) {
+      const db = lin < 1e-6 ? -60 : 20*Math.log10(lin);
+      return Math.max(0, Math.min(100, (db + 60) * (100/60)));
+    },
+    meterColor(lin) {
+      const db = lin < 1e-6 ? -60 : 20*Math.log10(lin);
+      if (db > -3)  return 'bg-red-500';
+      if (db > -12) return 'bg-amber-400';
+      return 'bg-green-500';
+    },
+    grPct(db) {
+      // db is positive when compressing (0 = no GR, 24 = max shown)
+      return Math.max(0, Math.min(100, (db / 24) * 100));
+    },
+    bandLabel(idx) {
+      const x = this.state.dsp.xover;
+      if (idx === 0) return '0 – ' + x[0] + ' Hz';
+      if (idx === 5) return (x[4]/1000).toFixed(1) + 'k – 20k';
+      const lo = x[idx-1];
+      const hi = x[idx];
+      const fmt = v => v >= 1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0);
+      return fmt(lo) + ' – ' + fmt(hi) + ' Hz';
+    }
+  };
+}
+</script>
+</body>
+</html>

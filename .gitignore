@@ -1,0 +1,67 @@
+# --- Build output ----------------------------------------------------------
+build/
+build-*/
+cmake-build-*/
+out/
+_deps/
+*.dir/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+# --- CMake -----------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.cmake/
+
+# --- JUCE artefacts --------------------------------------------------------
+JuceLibraryCode/
+*_artefacts/
+Builds/
+
+# --- IDE -------------------------------------------------------------------
+.vscode/
+.vs/
+.idea/
+*.user
+*.sln
+*.vcxproj
+*.vcxproj.*
+*.xcworkspace/
+*.xcodeproj/
+xcuserdata/
+
+# --- macOS -----------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- Windows ---------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# --- Compiled --------------------------------------------------------------
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.app
+*.dmg
+*.pdb
+*.ilk
+*.exp
+
+# --- App runtime data ------------------------------------------------------
+config/local.json
+presets/local/
+logs/
