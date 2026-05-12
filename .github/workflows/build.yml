@@ -52,17 +52,24 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      # Cache key bumped to v3 to discard any leftover from the previous libshout
+      # attempt (which had pulled OpenSSL + others as transitive deps).
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-${{ runner.os }}-mp3lame-only-v2
+          key: vcpkg-${{ runner.os }}-mp3lame-clean-v3
 
-      - name: Setup vcpkg
+      - name: Setup vcpkg (clean install dir)
         shell: pwsh
         run: |
           if (-not (Test-Path "C:\vcpkg")) {
             git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg
+          }
+          # Force a clean install dir so any leftover ports / DLLs from previous
+          # cached state are removed. mp3lame alone gets reinstalled below.
+          if (Test-Path "C:\vcpkg\installed") {
+            Remove-Item "C:\vcpkg\installed" -Recurse -Force
           }
           cd C:\vcpkg
           .\bootstrap-vcpkg.bat -disableMetrics
@@ -90,14 +97,27 @@ jobs:
           Write-Host "==> Built artefacts tree:"
           Get-ChildItem -Recurse build\UG6Broadcaster_artefacts | Select-Object FullName
 
+      - name: Inspect UG6Broadcaster.exe dependencies
+        shell: pwsh
+        run: |
+          # Use dumpbin (ships with MSBuild) to print the import table — lets us
+          # see exactly which DLLs we need to bundle, no guessing.
+          $vcvarsall = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          $exe = (Get-ChildItem -Recurse -File -Include "UG6Broadcaster.exe" build\UG6Broadcaster_artefacts | Select-Object -First 1).FullName
+          Write-Host "=== Imports of $exe ==="
+          cmd /c "call `"$vcvarsall`" && dumpbin /dependents `"$exe`""
+
       - name: Bundle runtime DLLs next to the .exe
         shell: pwsh
         run: |
           $binDir = (Get-ChildItem -Recurse -File -Include "UG6Broadcaster.exe" build\UG6Broadcaster_artefacts | Select-Object -First 1).Directory.FullName
           Write-Host "Binary directory: $binDir"
           $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
-          Write-Host "Copying DLLs from $vcpkgBin to $binDir"
-          Copy-Item "$vcpkgBin\*.dll" $binDir -Force
+          if (Test-Path $vcpkgBin) {
+            Write-Host "Copying DLLs from $vcpkgBin to $binDir"
+            Copy-Item "$vcpkgBin\*.dll" $binDir -Force
+          }
+          Write-Host "=== Final bundle ==="
           Get-ChildItem $binDir
 
       - name: Copy README + build info into the artifact
