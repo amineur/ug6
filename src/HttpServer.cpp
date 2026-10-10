@@ -623,7 +623,7 @@ void HttpServer::setupRoutes()
         res.set_content (buildStateJson(), "application/json");
     });
 
-    server->Post ("/api/broadcast/connect", [this] (const httplib::Request&, httplib::Response& res)
+    server->Post ("/api/broadcast/connect", [this] (const httplib::Request& req, httplib::Response& res)
     {
         if (! BroadcastSender::isAvailable())
         {
@@ -640,7 +640,7 @@ void HttpServer::setupRoutes()
         res.set_content (buildStateJson(), "application/json");
     });
 
-    server->Post ("/api/broadcast/disconnect", [this] (const httplib::Request&, httplib::Response& res)
+    server->Post ("/api/broadcast/disconnect", [this] (const httplib::Request& req, httplib::Response& res)
     {
         const int idx = req.has_param ("i") ? juce::jlimit (0, AudioEngine::kNumEncoders - 1, std::stoi (req.get_param_value ("i"))) : 0;
         auto& sender = engine.getBroadcastSender (idx);
