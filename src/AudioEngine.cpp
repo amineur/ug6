@@ -75,6 +75,32 @@ juce::String AudioEngine::setOutputDevice (const juce::String& name)
     return deviceManager.setAudioDeviceSetup (setup, true);
 }
 
+juce::String AudioEngine::getCurrentDriverType() const
+{
+    auto* type = const_cast<juce::AudioDeviceManager&> (deviceManager).getCurrentDeviceTypeObject();
+    return type != nullptr ? type->getTypeName() : juce::String();
+}
+
+juce::StringArray AudioEngine::getAvailableDriverTypes()
+{
+    juce::StringArray names;
+    for (auto* t : deviceManager.getAvailableDeviceTypes())
+        if (t != nullptr) names.add (t->getTypeName());
+    return names;
+}
+
+juce::String AudioEngine::setDriverType (const juce::String& typeName)
+{
+    // Switching the backend reinitialises the device list and may open a new
+    // default device. JUCE handles the close/reopen internally.
+    deviceManager.setCurrentAudioDeviceType (typeName, true);
+
+    // Verify the switch took.
+    if (getCurrentDriverType() != typeName)
+        return "impossible de basculer sur le driver « " + typeName + " »";
+    return {};
+}
+
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
     sampleRate = device->getCurrentSampleRate();
@@ -83,6 +109,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     dsp.prepare (sampleRate, blockSize, 2);
     filePlayer.prepare (sampleRate, blockSize);
     broadcaster.prepare (sampleRate);
+
+    silenceBuffer.setSize (2, blockSize, false, true, true);
+    silenceBuffer.clear();
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -154,16 +183,30 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs,
     juce::AudioBuffer<float> outBuf (outputs, numOutputChannels, numSamples);
     dsp.process (outBuf);
 
-    // ---------- 3. ON AIR gate — mute final output if not live ----------
-    const bool onAirNow = onAir.load (std::memory_order_relaxed);
-    if (! onAirNow)
+    // ---------- 3. Push to Icecast encoder (ON AIR gates the stream) ----------
+    // ON AIR off => listeners get silence, but local monitoring stays untouched
+    // so the operator can preview without going live.
+    const bool onAirNow   = onAir.load          (std::memory_order_relaxed);
+    const bool monitorNow = monitorEnabled.load (std::memory_order_relaxed);
+
+    if (onAirNow)
+    {
+        broadcaster.pushAudio (outputs, numOutputChannels, numSamples);
+    }
+    else
+    {
+        // Pre-allocated zero buffer — no allocation in audio thread.
+        float* silentChans[2] = { silenceBuffer.getWritePointer (0),
+                                  silenceBuffer.getWritePointer (1) };
+        broadcaster.pushAudio (silentChans, 2, numSamples);
+    }
+
+    // ---------- 4. Monitor gate — mute the speakers if monitoring disabled ----------
+    // Independent of ON AIR : you can preview off-air, or stream silently.
+    if (! monitorNow)
     {
         for (int ch = 0; ch < numOutputChannels; ++ch)
             if (outputs[ch] != nullptr)
                 std::memset (outputs[ch], 0, sizeof (float) * static_cast<size_t> (numSamples));
     }
-
-    // ---------- 4. Push to Icecast encoder (silence when off-air) ----------
-    // ON AIR off => the output buffer is now zeros, so listeners hear silence.
-    broadcaster.pushAudio (outputs, numOutputChannels, numSamples);
 }

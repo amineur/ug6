@@ -6,15 +6,25 @@
  }
 #endif
 
+#if UG6_HAS_FDKAAC
+ extern "C" {
+   #include <fdk-aac/aacenc_lib.h>
+ }
+#endif
+
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <iostream>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 //  Lifecycle
 // ---------------------------------------------------------------------------
 bool BroadcastSender::isAvailable()
 {
-   #if UG6_HAS_LAME
+   #if UG6_HAS_LAME || UG6_HAS_FDKAAC
     return true;
    #else
     return false;
@@ -23,7 +33,7 @@ bool BroadcastSender::isAvailable()
 
 BroadcastSender::BroadcastSender()
 {
-   #if UG6_HAS_LAME
+   #if UG6_HAS_LAME || UG6_HAS_FDKAAC
     status.store (Status::Disconnected);
     running.store (true);
     senderThread = std::thread ([this] { senderThreadLoop(); });
@@ -34,7 +44,7 @@ BroadcastSender::BroadcastSender()
 
 BroadcastSender::~BroadcastSender()
 {
-   #if UG6_HAS_LAME
+   #if UG6_HAS_LAME || UG6_HAS_FDKAAC
     running.store (false);
     wantsToBeConnected.store (false);
     if (senderThread.joinable())
@@ -122,67 +132,162 @@ void BroadcastSender::setError (const juce::String& msg)
 // ---------------------------------------------------------------------------
 //  Sender thread + connection management (native Icecast SOURCE protocol)
 // ---------------------------------------------------------------------------
-#if UG6_HAS_LAME
+#if UG6_HAS_LAME || UG6_HAS_FDKAAC
 
 bool BroadcastSender::openConnection()
 {
     setError ({});
     Config cfg = getConfig();
 
-    // ----- 1. Initialise LAME -----
-    auto* lame = lame_init();
-    if (lame == nullptr) { setError ("lame_init() a échoué"); return false; }
-
-    lame_set_in_samplerate (lame, static_cast<int> (sampleRate));
-    lame_set_num_channels  (lame, 2);
-    lame_set_brate         (lame, cfg.bitrateKbps);
-    lame_set_quality       (lame, 2);
-    lame_set_mode          (lame, JOINT_STEREO);
-
-    if (lame_init_params (lame) < 0)
+    // ----- 1. Initialise the encoder requested by cfg.codec -----
+    if (cfg.codec == Codec::MP3)
     {
-        setError ("lame_init_params() a échoué");
-        lame_close (lame);
+       #if UG6_HAS_LAME
+        auto* lame = lame_init();
+        if (lame == nullptr) { setError ("lame_init() a échoué"); return false; }
+
+        // Output at 44.1 kHz — Infomaniak's mounts (and most FM-style hosts) expect
+        // this rate. LAME does the resampling internally if input rate differs.
+        constexpr int kOutSampleRate = 44100;
+
+        lame_set_in_samplerate (lame, static_cast<int> (sampleRate));
+        lame_set_out_samplerate(lame, kOutSampleRate);
+        lame_set_num_channels  (lame, 2);
+        lame_set_brate         (lame, cfg.bitrateKbps);
+        lame_set_quality       (lame, 2);
+        lame_set_mode          (lame, JOINT_STEREO);
+
+        if (lame_init_params (lame) < 0)
+        {
+            setError ("lame_init_params() a échoué");
+            lame_close (lame);
+            return false;
+        }
+        lameCtx = lame;
+        std::cout << "[Broadcast] LAME ready : in=" << static_cast<int>(sampleRate)
+                  << "Hz  out=" << kOutSampleRate << "Hz  bitrate=" << cfg.bitrateKbps << "kbps\n" << std::flush;
+       #else
+        setError ("encoder MP3 non disponible — recompile avec LAME (brew install lame)");
         return false;
+       #endif
     }
-    lameCtx = lame;
+    else  // Codec::AAC
+    {
+       #if UG6_HAS_FDKAAC
+        HANDLE_AACENCODER aac = nullptr;
+        if (aacEncOpen (&aac, 0 /* any encoder modules */, 2 /* max channels */) != AACENC_OK)
+        {
+            setError ("aacEncOpen() a échoué");
+            return false;
+        }
+
+        const auto setp = [&] (AACENC_PARAM p, juce::uint32 v) {
+            return aacEncoder_SetParam (aac, p, v) == AACENC_OK;
+        };
+
+        // AAC-LC profile — universally supported by web/mobile players.
+        bool ok = setp (AACENC_AOT,         2 /* AOT_AAC_LC */);
+        ok    &= setp (AACENC_SAMPLERATE,   static_cast<juce::uint32> (sampleRate));
+        ok    &= setp (AACENC_CHANNELMODE,  2 /* MODE_2 stereo */);
+        ok    &= setp (AACENC_CHANNELORDER, 1 /* WAVE order */);
+        ok    &= setp (AACENC_BITRATE,      static_cast<juce::uint32> (cfg.bitrateKbps * 1000));
+        ok    &= setp (AACENC_TRANSMUX,     2 /* TT_MP4_ADTS — what Icecast expects */);
+        ok    &= setp (AACENC_AFTERBURNER,  1 /* better quality, slight CPU bump */);
+
+        if (! ok)
+        {
+            setError ("aacEncoder_SetParam() a échoué");
+            aacEncClose (&aac);
+            return false;
+        }
+
+        if (aacEncEncode (aac, nullptr, nullptr, nullptr, nullptr) != AACENC_OK)
+        {
+            setError ("phase d'init de l'aacEncoder a échoué");
+            aacEncClose (&aac);
+            return false;
+        }
+
+        AACENC_InfoStruct info {};
+        if (aacEncInfo (aac, &info) == AACENC_OK)
+            aacInputFrameSize = static_cast<int> (info.frameLength);
+        else
+            aacInputFrameSize = 1024;
+
+        aacCtx = aac;
+       #else
+        setError ("encoder AAC non disponible — recompile avec fdk-aac (brew install fdk-aac)");
+        return false;
+       #endif
+    }
 
     // ----- 2. Connect TCP socket to the Icecast server -----
     auto sock = std::make_unique<juce::StreamingSocket>();
     if (! sock->connect (cfg.host, cfg.port, 5000 /* ms timeout */))
     {
         setError ("connexion TCP impossible vers " + cfg.host + ":" + juce::String (cfg.port));
-        lame_close (lame); lameCtx = nullptr;
+       #if UG6_HAS_LAME
+        if (lameCtx) { lame_close (static_cast<lame_t> (lameCtx)); lameCtx = nullptr; }
+       #endif
+       #if UG6_HAS_FDKAAC
+        if (aacCtx)  { HANDLE_AACENCODER h = static_cast<HANDLE_AACENCODER> (aacCtx); aacEncClose (&h); aacCtx = nullptr; }
+       #endif
         return false;
     }
 
     // ----- 3. Send Icecast SOURCE headers -----
     // Icecast 2.x accepts the classic SOURCE method over HTTP/1.0.
-    const auto credsB64 = juce::Base64::toBase64 (cfg.user + ":" + cfg.password);
+    // Defensive: trim any stray whitespace/newlines that may have crept in
+    // from copy-paste in the UI form fields.
+    const auto user     = cfg.user.trim();
+    const auto password = cfg.password.trim();
+    const auto credsB64 = juce::Base64::toBase64 (user + ":" + password);
+
+    const char* mimeType = (cfg.codec == Codec::MP3) ? "audio/mpeg" : "audio/aac";
+
+    // Declare the bitstream sample rate that will reach the listener (44.1 kHz
+    // for MP3 since LAME resamples; for AAC we still pass through at the input
+    // rate until we add resampling there too).
+    const int outSampleRate = (cfg.codec == Codec::MP3) ? 44100 : static_cast<int> (sampleRate);
 
     juce::String headers;
     headers << "SOURCE " << cfg.mount << " HTTP/1.0\r\n"
-            << "Host: "          << cfg.host << ":" << cfg.port << "\r\n"
             << "Authorization: Basic " << credsB64 << "\r\n"
-            << "User-Agent: UG6Broadcaster/0.3\r\n"
-            << "Content-Type: audio/mpeg\r\n"
-            << "ice-name: "      << cfg.streamName  << "\r\n"
-            << "ice-genre: "     << cfg.streamGenre << "\r\n"
-            << "ice-bitrate: "   << cfg.bitrateKbps << "\r\n"
+            << "User-Agent: libshout/2.4.6\r\n"        // mimic libshout — some providers filter by UA
+            << "Content-Type: " << mimeType << "\r\n"
             << "ice-public: 0\r\n"
+            << "ice-name: "      << cfg.streamName.trim()  << "\r\n"
+            << "ice-genre: "     << cfg.streamGenre.trim() << "\r\n"
+            << "ice-bitrate: "   << cfg.bitrateKbps << "\r\n"
             << "ice-audio-info: bitrate=" << cfg.bitrateKbps
                               << ";channels=2"
-                              << ";samplerate=" << static_cast<int> (sampleRate) << "\r\n"
+                              << ";samplerate=" << outSampleRate << "\r\n"
             << "\r\n";
 
     const auto headersUtf8 = headers.toRawUTF8();
     const auto headersLen  = static_cast<int> (headers.getNumBytesAsUTF8());
 
+    // ---- DEBUG : print exactly what we're sending to the console ----
+    std::cout << "\n========== UG6 Broadcast HANDSHAKE OUT ==========\n"
+              << "Endpoint : " << cfg.host << ":" << cfg.port << cfg.mount << "\n"
+              << "User     : " << user << "\n"
+              << "Password : " << password.length() << " chars\n"
+              << "B64 auth : " << credsB64 << "\n"
+              << "Bytes    : " << headersLen << "\n"
+              << "----- raw request -----\n"
+              << headers.toStdString()
+              << "----------------------\n" << std::flush;
+
     if (sock->write (headersUtf8, headersLen) != headersLen)
     {
         setError ("échec écriture des headers SOURCE");
         sock.reset();
-        lame_close (lame); lameCtx = nullptr;
+       #if UG6_HAS_LAME
+        if (lameCtx) { lame_close (static_cast<lame_t> (lameCtx)); lameCtx = nullptr; }
+       #endif
+       #if UG6_HAS_FDKAAC
+        if (aacCtx)  { HANDLE_AACENCODER h = static_cast<HANDLE_AACENCODER> (aacCtx); aacEncClose (&h); aacCtx = nullptr; }
+       #endif
         return false;
     }
 
@@ -190,18 +295,36 @@ bool BroadcastSender::openConnection()
     if (sock->waitUntilReady (true /*read*/, 5000) <= 0)
     {
         setError ("aucune réponse du serveur Icecast (timeout 5 s)");
+        std::cout << "[Broadcast] no response within 5 s\n" << std::flush;
         sock.reset();
-        lame_close (lame); lameCtx = nullptr;
+       #if UG6_HAS_LAME
+        if (lameCtx) { lame_close (static_cast<lame_t> (lameCtx)); lameCtx = nullptr; }
+       #endif
+       #if UG6_HAS_FDKAAC
+        if (aacCtx)  { HANDLE_AACENCODER h = static_cast<HANDLE_AACENCODER> (aacCtx); aacEncClose (&h); aacCtx = nullptr; }
+       #endif
         return false;
     }
 
     char respBuf[1024] = {};
     const int n = sock->read (respBuf, sizeof (respBuf) - 1, true);
+
+    std::cout << "========== UG6 Broadcast RESPONSE IN ==========\n"
+              << "Bytes : " << n << "\n"
+              << "----- raw response -----\n"
+              << (n > 0 ? std::string (respBuf, static_cast<size_t> (n)) : std::string ("(empty)"))
+              << "\n========================\n" << std::flush;
+
     if (n <= 0)
     {
         setError ("connexion Icecast fermée pendant la lecture de la réponse");
         sock.reset();
-        lame_close (lame); lameCtx = nullptr;
+       #if UG6_HAS_LAME
+        if (lameCtx) { lame_close (static_cast<lame_t> (lameCtx)); lameCtx = nullptr; }
+       #endif
+       #if UG6_HAS_FDKAAC
+        if (aacCtx)  { HANDLE_AACENCODER h = static_cast<HANDLE_AACENCODER> (aacCtx); aacEncClose (&h); aacCtx = nullptr; }
+       #endif
         return false;
     }
 
@@ -211,11 +334,17 @@ bool BroadcastSender::openConnection()
         const auto firstLine = response.upToFirstOccurrenceOf ("\r\n", false, false);
         setError ("serveur Icecast : " + firstLine);
         sock.reset();
-        lame_close (lame); lameCtx = nullptr;
+       #if UG6_HAS_LAME
+        if (lameCtx) { lame_close (static_cast<lame_t> (lameCtx)); lameCtx = nullptr; }
+       #endif
+       #if UG6_HAS_FDKAAC
+        if (aacCtx)  { HANDLE_AACENCODER h = static_cast<HANDLE_AACENCODER> (aacCtx); aacEncClose (&h); aacCtx = nullptr; }
+       #endif
         return false;
     }
 
     socket = std::move (sock);
+    std::cout << "[Broadcast] >>> CONNECTED — waiting for audio chunks to encode and send...\n" << std::flush;
     return true;
 }
 
@@ -226,6 +355,7 @@ void BroadcastSender::closeConnection()
         socket->close();
         socket.reset();
     }
+   #if UG6_HAS_LAME
     if (lameCtx != nullptr)
     {
         unsigned char tail[8192];
@@ -233,6 +363,16 @@ void BroadcastSender::closeConnection()
         lame_close (static_cast<lame_t> (lameCtx));
         lameCtx = nullptr;
     }
+   #endif
+   #if UG6_HAS_FDKAAC
+    if (aacCtx != nullptr)
+    {
+        HANDLE_AACENCODER h = static_cast<HANDLE_AACENCODER> (aacCtx);
+        aacEncClose (&h);
+        aacCtx = nullptr;
+    }
+   #endif
+    aacInputFrameSize = 0;
     fifo.reset();
 }
 
@@ -240,10 +380,13 @@ void BroadcastSender::senderThreadLoop()
 {
     juce::Thread::setCurrentThreadName ("UG6BroadcastSender");
 
-    constexpr int kChunkSamples = 1152; // 1 MP3 frame at standard rates
-    std::vector<unsigned char> mp3Buf (static_cast<size_t> (kChunkSamples) * 5 + 7200);
-    std::vector<float> left  (kChunkSamples);
-    std::vector<float> right (kChunkSamples);
+    // 1024 samples works for both codecs : it's the AAC-LC frame size, and
+    // LAME is fine with any input length.
+    constexpr int kChunkSamples = 1024;
+    std::vector<unsigned char> outBuf (static_cast<size_t> (kChunkSamples) * 5 + 7200);
+    std::vector<float>   left  (kChunkSamples);
+    std::vector<float>   right (kChunkSamples);
+    std::vector<int16_t> pcmInterleaved (static_cast<size_t> (kChunkSamples) * 2);  // for AAC
 
     int backoffMs = 500;
 
@@ -278,7 +421,7 @@ void BroadcastSender::senderThreadLoop()
             }
         }
 
-        if (! wantConnect && (socket != nullptr || lameCtx != nullptr))
+        if (! wantConnect && (socket != nullptr || lameCtx != nullptr || aacCtx != nullptr))
         {
             closeConnection();
             status.store (Status::Disconnected);
@@ -305,25 +448,105 @@ void BroadcastSender::senderThreadLoop()
             }
             fifo.finishedRead (sz1 + sz2);
 
-            const int mp3Bytes = lame_encode_buffer_ieee_float (
-                static_cast<lame_t> (lameCtx),
-                left.data(), right.data(), filled,
-                mp3Buf.data(), static_cast<int> (mp3Buf.size()));
+            int encodedBytes = 0;
+            bool encodeError = false;
 
-            if (mp3Bytes < 0)
+           #if UG6_HAS_LAME
+            if (lameCtx != nullptr)
             {
-                setError ("LAME encode error " + juce::String (mp3Bytes));
+                const int n = lame_encode_buffer_ieee_float (
+                    static_cast<lame_t> (lameCtx),
+                    left.data(), right.data(), filled,
+                    outBuf.data(), static_cast<int> (outBuf.size()));
+                if (n < 0) { setError ("LAME encode error " + juce::String (n)); encodeError = true; }
+                else       { encodedBytes = n; }
+            }
+           #endif
+           #if UG6_HAS_FDKAAC
+            if (aacCtx != nullptr && ! encodeError)
+            {
+                // Interleave + convert float [-1,1] → int16 (fdk-aac's expected format).
+                for (int i = 0; i < filled; ++i)
+                {
+                    const float l = juce::jlimit (-1.0f, 1.0f, left [i]);
+                    const float r = juce::jlimit (-1.0f, 1.0f, right[i]);
+                    pcmInterleaved [2 * i    ] = static_cast<int16_t> (l * 32767.0f);
+                    pcmInterleaved [2 * i + 1] = static_cast<int16_t> (r * 32767.0f);
+                }
+
+                void* in_ptr        = pcmInterleaved.data();
+                int   in_size       = static_cast<int> (filled * 2 * sizeof (int16_t));
+                int   in_id         = 1 /* IN_AUDIO_DATA */;
+                int   in_elsize     = sizeof (int16_t);
+
+                AACENC_BufDesc in_buf = {};
+                in_buf.numBufs           = 1;
+                in_buf.bufs              = &in_ptr;
+                in_buf.bufferIdentifiers = &in_id;
+                in_buf.bufSizes          = &in_size;
+                in_buf.bufElSizes        = &in_elsize;
+
+                void* out_ptr       = outBuf.data();
+                int   out_size      = static_cast<int> (outBuf.size());
+                int   out_id        = 257 /* OUT_BITSTREAM_DATA = 0x0101 */;
+                int   out_elsize    = 1;
+
+                AACENC_BufDesc out_buf_desc = {};
+                out_buf_desc.numBufs           = 1;
+                out_buf_desc.bufs              = &out_ptr;
+                out_buf_desc.bufferIdentifiers = &out_id;
+                out_buf_desc.bufSizes          = &out_size;
+                out_buf_desc.bufElSizes        = &out_elsize;
+
+                AACENC_InArgs  in_args  = {};
+                in_args.numInSamples    = filled * 2;  // total interleaved samples
+                AACENC_OutArgs out_args = {};
+
+                const AACENC_ERROR err = aacEncEncode (
+                    static_cast<HANDLE_AACENCODER> (aacCtx),
+                    &in_buf, &out_buf_desc, &in_args, &out_args);
+
+                if (err != AACENC_OK && err != AACENC_ENCODE_EOF)
+                {
+                    setError ("AAC encode error " + juce::String (static_cast<int> (err)));
+                    encodeError = true;
+                }
+                else
+                {
+                    encodedBytes = out_args.numOutBytes;
+                }
+            }
+           #endif
+
+            if (encodeError)
+            {
                 closeConnection();
                 status.store (Status::Error);
                 reconnects.fetch_add (1);
                 continue;
             }
 
-            if (mp3Bytes > 0)
+            if (encodedBytes > 0)
             {
-                if (socket->write (mp3Buf.data(), mp3Bytes) != mp3Bytes)
+                const int written = socket->write (outBuf.data(), encodedBytes);
+                static int writeCallCount = 0;
+                ++writeCallCount;
+
+                // Log the first 5 writes verbosely, then every 50th to avoid spam.
+                if (writeCallCount <= 5 || (writeCallCount % 50) == 0)
+                    std::cout << "[Broadcast] write #" << writeCallCount
+                              << " asked=" << encodedBytes
+                              << " wrote=" << written
+                              << " total=" << (bytesSent.load() + (written > 0 ? written : 0)) << " B\n" << std::flush;
+
+                if (written != encodedBytes)
                 {
-                    setError ("connexion Icecast perdue (write a échoué)");
+                    std::cout << "[Broadcast] !!! write FAILED at call #" << writeCallCount
+                              << " : asked " << encodedBytes
+                              << " bytes, wrote " << written
+                              << " (total sent so far : " << bytesSent.load() << " B)\n" << std::flush;
+                    writeCallCount = 0;  // reset for next connection
+                    setError ("connexion Icecast perdue (write retourne " + juce::String (written) + ")");
                     closeConnection();
                     status.store (Status::Error);
                     reconnects.fetch_add (1);
@@ -331,7 +554,16 @@ void BroadcastSender::senderThreadLoop()
                     backoffMs = juce::jmin (backoffMs * 2, 30000);
                     continue;
                 }
-                bytesSent.fetch_add (mp3Bytes);
+                bytesSent.fetch_add (encodedBytes);
+            }
+            else if (status.load() == Status::Connected)
+            {
+                // Encoder produced 0 bytes (still buffering internally). Normal at start.
+                static int zeroEncodeCount = 0;
+                ++zeroEncodeCount;
+                if (zeroEncodeCount <= 3)
+                    std::cout << "[Broadcast] encoder produced 0 bytes (call #" << zeroEncodeCount
+                              << ", normal during warmup)\n" << std::flush;
             }
             // Real-time pacing is handled implicitly : we only get audio at real-time rate
             // from the audio callback, so the FIFO refills at the same speed.
@@ -345,7 +577,7 @@ void BroadcastSender::senderThreadLoop()
     closeConnection();
 }
 
-#else  // ---------- stub when LAME isn't available ----------
+#else  // ---------- stub when neither LAME nor fdk-aac is available ----------
 
 bool BroadcastSender::openConnection()  { return false; }
 void BroadcastSender::closeConnection() {}
@@ -380,6 +612,7 @@ juce::String BroadcastSender::toJson() const
             << ",\"name\":\""    << esc (c.streamName)  << "\""
             << ",\"genre\":\""   << esc (c.streamGenre) << "\""
             << ",\"bitrate\":"   << c.bitrateKbps
+            << ",\"codec\":\""   << codecToString (c.codec) << "\""
         << "}"
       << "}";
     return j;

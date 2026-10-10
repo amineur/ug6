@@ -230,7 +230,8 @@ std::string HttpServer::buildStateJson() const
 
     juce::String s;
     s << "{"
-      << "\"onAir\":"  << (engine.isOnAir() ? "true" : "false")
+      << "\"onAir\":"   << (engine.isOnAir() ? "true" : "false")
+      << ",\"monitor\":" << (engine.isMonitorEnabled() ? "true" : "false")
       << ",\"source\":\"" << srcName << "\""
       << ",\"gen\":{\"freqHz\":" << engine.getGenFrequency()
             << ",\"gainDb\":"     << engine.getGenGainDb() << "}"
@@ -255,16 +256,20 @@ std::string HttpServer::buildStateJson() const
 std::string HttpServer::buildDevicesJson() const
 {
     auto& e = const_cast<AudioEngine&>(engine);
-    const auto ins  = e.getInputDeviceNames();
-    const auto outs = e.getOutputDeviceNames();
+    const auto ins     = e.getInputDeviceNames();
+    const auto outs    = e.getOutputDeviceNames();
+    const auto drivers = e.getAvailableDriverTypes();
 
     juce::String s;
     s << "{\"in\":[";
     for (int i = 0; i < ins.size(); ++i)  { if (i > 0) s << ","; s << "\"" << jsonEscape (ins[i])  << "\""; }
     s << "],\"out\":[";
     for (int i = 0; i < outs.size(); ++i) { if (i > 0) s << ","; s << "\"" << jsonEscape (outs[i]) << "\""; }
+    s << "],\"drivers\":[";
+    for (int i = 0; i < drivers.size(); ++i) { if (i > 0) s << ","; s << "\"" << jsonEscape (drivers[i]) << "\""; }
     s << "],\"current\":{\"in\":\""  << jsonEscape (e.getCurrentInputDevice())  << "\""
-                  << ",\"out\":\""<< jsonEscape (e.getCurrentOutputDevice()) << "\"}}";
+                  << ",\"out\":\""<< jsonEscape (e.getCurrentOutputDevice()) << "\""
+                  << ",\"driver\":\""<< jsonEscape (e.getCurrentDriverType()) << "\"}}";
     return s.toStdString();
 }
 
@@ -290,6 +295,12 @@ void HttpServer::setupRoutes()
     server->Post ("/api/onair", [this] (const httplib::Request& req, httplib::Response& res)
     {
         engine.setOnAir (parseBoolBody (req.body));
+        res.set_content (buildStateJson(), "application/json");
+    });
+
+    server->Post ("/api/monitor", [this] (const httplib::Request& req, httplib::Response& res)
+    {
+        engine.setMonitorEnabled (parseBoolBody (req.body));
         res.set_content (buildStateJson(), "application/json");
     });
 
@@ -323,6 +334,13 @@ void HttpServer::setupRoutes()
     server->Post ("/api/device/out", [this] (const httplib::Request& req, httplib::Response& res)
     {
         const auto err = engine.setOutputDevice (juce::String (req.body));
+        if (err.isNotEmpty()) { res.status = 500; res.set_content (err.toStdString(), "text/plain"); return; }
+        res.set_content (buildStateJson(), "application/json");
+    });
+
+    server->Post ("/api/device/driver", [this] (const httplib::Request& req, httplib::Response& res)
+    {
+        const auto err = engine.setDriverType (juce::String (req.body).trim());
         if (err.isNotEmpty()) { res.status = 500; res.set_content (err.toStdString(), "text/plain"); return; }
         res.set_content (buildStateJson(), "application/json");
     });
@@ -483,6 +501,7 @@ void HttpServer::setupRoutes()
         cfg.streamName   = get ("name",     cfg.streamName).toString();
         cfg.streamGenre  = get ("genre",    cfg.streamGenre).toString();
         cfg.bitrateKbps  = static_cast<int> (get ("bitrate",    cfg.bitrateKbps));
+        cfg.codec        = BroadcastSender::codecFromString (get ("codec", juce::var (BroadcastSender::codecToString (cfg.codec))).toString());
 
         engine.getBroadcastSender().setConfig (cfg);
         instanceConfig.saveBroadcastConfig (cfg);   // persist immediately to disk

@@ -60,16 +60,24 @@
     <!-- ============================ TOP CONTROL BAR ============================ -->
     <section class="grid grid-cols-12 gap-3 items-stretch">
 
-      <!-- ON AIR -->
-      <div class="col-span-3 panel p-3 flex flex-col items-center justify-center">
+      <!-- ON AIR + MONITOR -->
+      <div class="col-span-3 panel p-3 flex flex-col items-center justify-center space-y-2">
         <button @click="toggleOnAir()"
                 :class="state.onAir ? 'bg-red-600 text-white on-air-pulse' : 'bg-gray-900 text-gray-600 border border-gray-800 hover:border-gray-700'"
-                class="w-full py-4 rounded text-2xl font-black tracking-[0.3em] transition-colors">
+                class="w-full py-3 rounded text-2xl font-black tracking-[0.3em] transition-colors">
           ON AIR
         </button>
-        <p class="mt-2 text-[10px] tracking-widest uppercase mono"
+        <p class="text-[10px] tracking-widest uppercase mono"
            :class="state.onAir ? 'text-red-400' : 'text-gray-600'"
            x-text="state.onAir ? '● live signal' : '○ standby'"></p>
+
+        <!-- Monitor toggle : sortie HP indépendante d'ON AIR -->
+        <button @click="toggleMonitor()"
+                :class="state.monitor ? 'bg-sky-600 text-white' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'"
+                class="w-full py-1.5 rounded text-[11px] font-semibold tracking-wider"
+                title="Active la sortie HP pour cette instance. Indépendant du flux Icecast.">
+          <span x-text="state.monitor ? '🔊 MONITOR ON' : '🔇 monitor off'"></span>
+        </button>
       </div>
 
       <!-- SOURCE + BYPASS -->
@@ -96,6 +104,14 @@
       <!-- DEVICES -->
       <div class="col-span-3 panel p-3 space-y-2">
         <h3>Devices</h3>
+        <div x-show="devices.drivers && devices.drivers.length > 1">
+          <label class="text-[10px] text-gray-500 mono block mb-1">Driver</label>
+          <select class="w-full" @change="setDriver($event.target.value)" title="WASAPI : moderne ; MME : compatible Virtual Audio Cable comme Oddcast">
+            <template x-for="d in devices.drivers" :key="d">
+              <option :value="d" :selected="devices.current && devices.current.driver === d" x-text="d"></option>
+            </template>
+          </select>
+        </div>
         <div>
           <label class="text-[10px] text-gray-500 mono block mb-1">Input</label>
           <select class="w-full" @change="setInputDevice($event.target.value)">
@@ -482,12 +498,19 @@ cmake --build build -j</pre>
                  class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500"
                  placeholder="/stream" />
         </div>
-        <div class="col-span-3">
+        <div class="col-span-2">
           <label class="text-gray-500 text-[10px] uppercase tracking-wider">Bitrate</label>
           <select x-model.number="bc.bitrate" @change="saveBroadcastConfig()" class="w-full">
             <template x-for="b in [64,96,128,192,256,320]" :key="b">
               <option :value="b" x-text="b + ' kbps'"></option>
             </template>
+          </select>
+        </div>
+        <div class="col-span-1">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Codec</label>
+          <select x-model="bc.codec" @change="saveBroadcastConfig()" class="w-full">
+            <option value="mp3">MP3</option>
+            <option value="aac">AAC</option>
           </select>
         </div>
 
@@ -564,6 +587,7 @@ function app() {
   return {
     state: {
       onAir: false,
+      monitor: false,
       source: 'generator',
       gen: { freqHz: 1000, gainDb: -18 },
       file: { loaded: false, playing: false, looping: true, name: '', position: 0, duration: 0 },
@@ -575,7 +599,7 @@ function app() {
     devices: { in: [], out: [] },
     userPresets: [],
     newPresetName: '',
-    bc: { host: 'localhost', port: 8000, mount: '/stream', user: 'source', password: '', name: 'UG6 Broadcaster', genre: 'Various', bitrate: 128 },
+    bc: { host: 'localhost', port: 8000, mount: '/stream', user: 'source', password: '', name: 'UG6 Broadcaster', genre: 'Various', bitrate: 128, codec: 'mp3' },
     bcSynced: false,
     meterStream: 'closed',
     dragHover: false,
@@ -634,6 +658,7 @@ function app() {
 
     // --- master controls ---
     async toggleOnAir()   { const r = await fetch('/api/onair',  { method:'POST', body: this.state.onAir ? 'false' : 'true' }); this.applyState(await r.json()); },
+    async toggleMonitor() { const r = await fetch('/api/monitor', { method:'POST', body: this.state.monitor ? 'false' : 'true' }); this.applyState(await r.json()); },
     async setSource(s)    { const r = await fetch('/api/source', { method:'POST', body: s }); this.applyState(await r.json()); },
     async setGenFreq(v)   { this.state.gen.freqHz = +v; await fetch('/api/gen/freq', { method:'POST', body: String(v) }); },
     async setGenGain(v)   { this.state.gen.gainDb = +v; await fetch('/api/gen/gain', { method:'POST', body: String(v) }); },
@@ -641,6 +666,7 @@ function app() {
     // --- device selectors ---
     async setInputDevice(name)  { const r = await fetch('/api/device/in',  { method:'POST', body: name }); if (r.ok) this.applyState(await r.json()); else alert('Erreur device input : ' + await r.text()); this.refreshDevices(); },
     async setOutputDevice(name) { const r = await fetch('/api/device/out', { method:'POST', body: name }); if (r.ok) this.applyState(await r.json()); else alert('Erreur device output : ' + await r.text()); this.refreshDevices(); },
+    async setDriver(name)       { const r = await fetch('/api/device/driver', { method:'POST', body: name }); if (r.ok) this.applyState(await r.json()); else alert('Erreur driver : ' + await r.text()); this.refreshDevices(); },
 
     // --- generic DSP param setter ---
     async setParam(path, value) {

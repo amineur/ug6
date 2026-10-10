@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LAME
-        run: brew install lame
+      - name: Install LAME + fdk-aac
+        run: brew install lame fdk-aac
 
       - name: Configure
         run: >
@@ -58,7 +58,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-${{ runner.os }}-mp3lame-clean-v3
+          key: vcpkg-${{ runner.os }}-mp3lame-fdkaac-v4
 
       - name: Setup vcpkg (clean install dir)
         shell: pwsh
@@ -75,10 +75,10 @@ jobs:
           .\bootstrap-vcpkg.bat -disableMetrics
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-      - name: vcpkg install LAME
+      - name: vcpkg install LAME + fdk-aac
         shell: pwsh
         run: |
-          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows
+          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows fdk-aac:x64-windows
 
       - name: Configure CMake (vcpkg toolchain)
         shell: pwsh

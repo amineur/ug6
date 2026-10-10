@@ -7,11 +7,14 @@
 #include <memory>
 #include <thread>
 
-// LAME is the only required external library for encoding. The Icecast push
-// is implemented natively over juce::StreamingSocket — no libshout dependency,
-// which avoids a broken vcpkg port on Windows.
+// External encoder libraries — both optional.
+// LAME -> MP3 (always recommended for broad compatibility)
+// fdk-aac -> AAC LC (preferred for low-bitrate streaming, e.g. 64 kbps)
 #ifndef UG6_HAS_LAME
  #define UG6_HAS_LAME 0
+#endif
+#ifndef UG6_HAS_FDKAAC
+ #define UG6_HAS_FDKAAC 0
 #endif
 
 /**
@@ -29,6 +32,7 @@ class BroadcastSender
 {
 public:
     enum class Status { Disabled, Disconnected, Connecting, Connected, Error };
+    enum class Codec  { MP3, AAC };
 
     struct Config
     {
@@ -40,7 +44,12 @@ public:
         juce::String streamName  { "UG6 Broadcaster" };
         juce::String streamGenre { "Various" };
         int          bitrateKbps { 128 };
+        Codec        codec       { Codec::MP3 };
     };
+
+    /** Returns "mp3" or "aac" — used by the JSON layer. */
+    static const char* codecToString (Codec c) noexcept { return c == Codec::MP3 ? "mp3" : "aac"; }
+    static Codec       codecFromString (const juce::String& s) noexcept { return s == "aac" ? Codec::AAC : Codec::MP3; }
 
     BroadcastSender();
     ~BroadcastSender();
@@ -95,8 +104,11 @@ private:
 
     double sampleRate = 48000.0;
 
-    // LAME opaque pointer (touched only on sender thread).
-    void* lameCtx = nullptr;
+    // Encoder opaque pointers (touched only on sender thread). Only one of
+    // these is non-null at a time, depending on cfg.codec.
+    void* lameCtx    = nullptr;   // LAME (MP3)
+    void* aacCtx     = nullptr;   // fdk-aac (AAC LC)
+    int   aacInputFrameSize = 0;  // samples-per-channel per aacEncEncode call
 
     // Outgoing TCP socket to the Icecast server.
     std::unique_ptr<juce::StreamingSocket> socket;

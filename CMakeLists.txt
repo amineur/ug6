@@ -24,14 +24,16 @@ set(FETCHCONTENT_QUIET OFF)
 
 # JUCE 7.0.12 — last 7.x release; preserves Win7 SP1 compatibility on Windows,
 # and compiles fine on macOS 14 (GitHub Actions macos-latest runner).
-# Known caveat : doesn't compile on macOS 15 (Sequoia) locally because Apple
-# removed CGWindowListCreateImage from the SDK. We accept that for now — local
-# dev on Mac 15 is not a priority compared to producing a Windows binary via CI.
+# For macOS 15 (Sequoia) you must apply the CGWindowListCreateImage patch manually
+# after the first cmake -B build (see README / cmake/patch-juce-macos15.cmake) :
+#   sed -i '' 's|CGWindowListCreateImage|((CGImageRef(*)(CGRect,CGWindowListOption,CGWindowID,CGWindowImageOption))NULL)/*UG6_STUB*/|g' \
+#       build/_deps/juce-src/modules/juce_gui_basics/native/juce_Windowing_mac.mm
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        7.0.12
-    GIT_SHALLOW    TRUE
+    # GIT_SHALLOW TRUE removed : triggers a CMake 4.3 FetchContent bug where
+    # populate's stub build step references a non-existent juce-build directory.
 )
 
 # cpp-httplib — single-header HTTP server, supports SSE via chunked content provider.
@@ -56,6 +58,7 @@ FetchContent_Declare(
 )
 
 FetchContent_MakeAvailable(JUCE httplib)
+# (macOS 15 patch is now applied via PATCH_COMMAND above, before FetchContent finishes.)
 
 # ---------------------------------------------------------------------------
 # Target
@@ -112,6 +115,22 @@ if(LAME_INCLUDE_DIR AND LAME_LIBRARY)
 else()
     message(WARNING "LAME not found — MP3 encoder will be disabled.\n  macOS : brew install lame\n  Windows : vcpkg install mp3lame:x64-windows")
     target_compile_definitions(UG6Broadcaster PRIVATE UG6_HAS_LAME=0)
+endif()
+
+# fdk-aac — AAC LC encoder (preferred for low-bitrate streaming).
+find_path(FDKAAC_INCLUDE_DIR fdk-aac/aacenc_lib.h
+    HINTS ${UG6_BREW_HINTS} PATH_SUFFIXES include)
+find_library(FDKAAC_LIBRARY fdk-aac
+    HINTS ${UG6_BREW_HINTS} PATH_SUFFIXES lib)
+
+if(FDKAAC_INCLUDE_DIR AND FDKAAC_LIBRARY)
+    message(STATUS "fdk-aac found: ${FDKAAC_LIBRARY}")
+    target_compile_definitions(UG6Broadcaster PRIVATE UG6_HAS_FDKAAC=1)
+    target_include_directories(UG6Broadcaster PRIVATE ${FDKAAC_INCLUDE_DIR})
+    target_link_libraries(UG6Broadcaster PRIVATE ${FDKAAC_LIBRARY})
+else()
+    message(WARNING "fdk-aac not found — AAC encoder will be disabled.\n  macOS : brew install fdk-aac\n  Windows : vcpkg install fdk-aac:x64-windows")
+    target_compile_definitions(UG6Broadcaster PRIVATE UG6_HAS_FDKAAC=0)
 endif()
 
 target_include_directories(UG6Broadcaster PRIVATE src)

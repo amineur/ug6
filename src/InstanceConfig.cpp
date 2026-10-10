@@ -36,6 +36,8 @@ BroadcastSender::Config InstanceConfig::loadBroadcastConfig() const
     cfg.streamName   = get ("name",     cfg.streamName).toString();
     cfg.streamGenre  = get ("genre",    cfg.streamGenre).toString();
     cfg.bitrateKbps  = static_cast<int> (get ("bitrate",  cfg.bitrateKbps));
+    cfg.codec        = BroadcastSender::codecFromString (get ("codec",
+                            juce::var (BroadcastSender::codecToString (cfg.codec))).toString());
     return cfg;
 }
 
@@ -53,7 +55,8 @@ bool InstanceConfig::saveBroadcastConfig (const BroadcastSender::Config& cfg) co
       << "    \"password\": \"" << esc (cfg.password)    << "\",\n"
       << "    \"name\":     \"" << esc (cfg.streamName)  << "\",\n"
       << "    \"genre\":    \"" << esc (cfg.streamGenre) << "\",\n"
-      << "    \"bitrate\":  "    << cfg.bitrateKbps      << "\n"
+      << "    \"bitrate\":  "    << cfg.bitrateKbps      << ",\n"
+      << "    \"codec\":    \"" << BroadcastSender::codecToString (cfg.codec) << "\"\n"
       << "  }\n"
       << "}\n";
 
