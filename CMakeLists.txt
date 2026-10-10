@@ -145,6 +145,11 @@ target_compile_definitions(UG6Broadcaster PRIVATE
     JUCE_USE_MP3AUDIOFORMAT=1          # MP3 decode for the FilePlayer
 )
 
+# Sources en UTF-8 (accents des messages : sans /utf-8, MSVC les lit en cp1252 et l'ecran affiche « dÃ©connectÃ© »)
+if(MSVC)
+    target_compile_options(UG6Broadcaster PRIVATE /utf-8)
+endif()
+
 target_link_libraries(UG6Broadcaster PRIVATE
     UG6BroadcasterAssets
     juce::juce_audio_basics

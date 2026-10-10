@@ -397,21 +397,21 @@ void HttpServer::setupRoutes()
 
     // --- State / devices ---
     server->Get ("/api/state",   [this] (const httplib::Request&, httplib::Response& res)
-                                 { res.set_content (buildStateJson(),   "application/json"); });
+                                 { res.set_content (buildStateJson(),   "application/json; charset=utf-8"); });
     server->Get ("/api/devices", [this] (const httplib::Request&, httplib::Response& res)
-                                 { res.set_content (buildDevicesJson(), "application/json"); });
+                                 { res.set_content (buildDevicesJson(), "application/json; charset=utf-8"); });
 
     // --- Master ---
     server->Post ("/api/onair", [this] (const httplib::Request& req, httplib::Response& res)
     {
         engine.setOnAir (parseBoolBody (req.body));
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/monitor", [this] (const httplib::Request& req, httplib::Response& res)
     {
         engine.setMonitorEnabled (parseBoolBody (req.body));
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/source", [this] (const httplib::Request& req, httplib::Response& res)
@@ -419,19 +419,19 @@ void HttpServer::setupRoutes()
         if      (req.body == "generator") engine.setSource (AudioEngine::Source::Generator);
         else if (req.body == "input")     engine.setSource (AudioEngine::Source::AudioInput);
         else if (req.body == "file")      engine.setSource (AudioEngine::Source::File);
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- Test generator ---
     server->Post ("/api/gen/freq", [this] (const httplib::Request& req, httplib::Response& res)
     {
         engine.setGenFrequency (parseFloatBody (req.body, engine.getGenFrequency()));
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
     server->Post ("/api/gen/gain", [this] (const httplib::Request& req, httplib::Response& res)
     {
         engine.setGenGainDb (parseFloatBody (req.body, engine.getGenGainDb()));
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- Device selection ---
@@ -439,20 +439,20 @@ void HttpServer::setupRoutes()
     {
         const auto err = engine.setInputDevice (juce::String (req.body));
         if (err.isNotEmpty()) { res.status = 500; res.set_content (err.toStdString(), "text/plain"); return; }
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
     server->Post ("/api/device/out", [this] (const httplib::Request& req, httplib::Response& res)
     {
         const auto err = engine.setOutputDevice (juce::String (req.body));
         if (err.isNotEmpty()) { res.status = 500; res.set_content (err.toStdString(), "text/plain"); return; }
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/device/driver", [this] (const httplib::Request& req, httplib::Response& res)
     {
         const auto err = engine.setDriverType (juce::String (req.body).trim());
         if (err.isNotEmpty()) { res.status = 500; res.set_content (err.toStdString(), "text/plain"); return; }
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- Generic DSP parameter setter ---
@@ -476,14 +476,14 @@ void HttpServer::setupRoutes()
             res.set_content ("invalid JSON body", "text/plain");
             return;
         }
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- Presets (built-in) ---
     server->Post ("/api/preset", [this] (const httplib::Request& req, httplib::Response& res)
     {
         applyPreset (engine.getDsp(), juce::String (req.body).trim());
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- User presets (custom JSON in ~/Library/Application Support/UG6Broadcaster/presets) ---
@@ -497,7 +497,7 @@ void HttpServer::setupRoutes()
             j << "\"" << jsonEscape (names[i]) << "\"";
         }
         j << "],\"directory\":\"" << jsonEscape (presets.getDirectory().getFullPathName()) << "\"}";
-        res.set_content (j.toStdString(), "application/json");
+        res.set_content (j.toStdString(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/preset/save", [this] (const httplib::Request& req, httplib::Response& res)
@@ -506,7 +506,7 @@ void HttpServer::setupRoutes()
         if (name.isEmpty()) { res.status = 400; res.set_content ("nom vide", "text/plain"); return; }
         const auto err = presets.save (name, engine.getDsp());
         if (err.isNotEmpty()) { res.status = 500; res.set_content (err.toStdString(), "text/plain"); return; }
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/preset/load", [this] (const httplib::Request& req, httplib::Response& res)
@@ -514,14 +514,14 @@ void HttpServer::setupRoutes()
         const auto name = juce::String (req.body).trim();
         const auto err = presets.load (name, engine.getDsp());
         if (err.isNotEmpty()) { res.status = 404; res.set_content (err.toStdString(), "text/plain"); return; }
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/preset/delete", [this] (const httplib::Request& req, httplib::Response& res)
     {
         const auto name = juce::String (req.body).trim();
         if (! presets.remove (name)) { res.status = 404; res.set_content ("preset introuvable", "text/plain"); return; }
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- File player ---
@@ -561,37 +561,37 @@ void HttpServer::setupRoutes()
 
         // Switching the source over makes the upload immediately audible.
         engine.setSource (AudioEngine::Source::File);
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/file/play", [this] (const httplib::Request&, httplib::Response& res)
     {
         engine.getFilePlayer().play();
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/file/pause", [this] (const httplib::Request&, httplib::Response& res)
     {
         engine.getFilePlayer().pause();
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/file/stop", [this] (const httplib::Request&, httplib::Response& res)
     {
         engine.getFilePlayer().stop();
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/file/loop", [this] (const httplib::Request& req, httplib::Response& res)
     {
         engine.getFilePlayer().setLooping (parseBoolBody (req.body));
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/file/seek", [this] (const httplib::Request& req, httplib::Response& res)
     {
         engine.getFilePlayer().setPositionSeconds (parseFloatBody (req.body, 0.0f));
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- Broadcast (Icecast push) ---
@@ -620,7 +620,7 @@ void HttpServer::setupRoutes()
 
         sender.setConfig (cfg);
         persist();
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/broadcast/connect", [this] (const httplib::Request& req, httplib::Response& res)
@@ -637,7 +637,7 @@ void HttpServer::setupRoutes()
         auto c = sender.getConfig(); c.enabled = true; sender.setConfig (c);    // AutoConnect, comme Oddcast
         sender.connect();
         persist();
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     server->Post ("/api/broadcast/disconnect", [this] (const httplib::Request& req, httplib::Response& res)
@@ -647,7 +647,7 @@ void HttpServer::setupRoutes()
         auto c = sender.getConfig(); c.enabled = false; sender.setConfig (c);
         sender.disconnect();
         persist();
-        res.set_content (buildStateJson(), "application/json");
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
     });
 
     // --- Titrage : le lecteur (UGPLAN Diff Web) envoie ici le titre en cours, pousse vers Icecast par chaque envoi ---
@@ -658,13 +658,13 @@ void HttpServer::setupRoutes()
         if (parsed.isObject()) song = parsed.getProperty ("song", "").toString().trim();
         for (int i = 0; i < AudioEngine::kNumEncoders; ++i)
             engine.getBroadcastSender (i).setMetadata (song);
-        res.set_content ("{\"ok\":true}", "application/json");
+        res.set_content ("{\"ok\":true}", "application/json; charset=utf-8");
     });
 
     // --- Importer les reglages d'Oddcast (dossier d'installation / de config) ---
     server->Post ("/api/oddcast/import", [this] (const httplib::Request& req, httplib::Response& res)
     {
-        res.set_content (importOddcast (juce::String::fromUTF8 (req.body.c_str(), static_cast<int> (req.body.size()))), "application/json");
+        res.set_content (importOddcast (juce::String::fromUTF8 (req.body.c_str(), static_cast<int> (req.body.size()))), "application/json; charset=utf-8");
     });
 
     // Tout changement de reglage est garde sur le disque (redemarrage sans surveillance).

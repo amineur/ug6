@@ -503,7 +503,9 @@ void BroadcastSender::senderThreadLoop()
 
                 void* in_ptr        = pcmInterleaved.data();
                 int   in_size       = static_cast<int> (filled * 2 * sizeof (int16_t));
-                int   in_id         = 1 /* IN_AUDIO_DATA */;
+                // Identifiants fdk-aac : IN_AUDIO_DATA = 0, OUT_BITSTREAM_DATA = 3 (les anciennes valeurs 1 et 257
+                // designaient les donnees annexes : l'encodeur ne recevait jamais de son et rendait 0 octet).
+                int   in_id         = IN_AUDIO_DATA;
                 int   in_elsize     = sizeof (int16_t);
 
                 AACENC_BufDesc in_buf = {};
@@ -515,7 +517,7 @@ void BroadcastSender::senderThreadLoop()
 
                 void* out_ptr       = outBuf.data();
                 int   out_size      = static_cast<int> (outBuf.size());
-                int   out_id        = 257 /* OUT_BITSTREAM_DATA = 0x0101 */;
+                int   out_id        = OUT_BITSTREAM_DATA;
                 int   out_elsize    = 1;
 
                 AACENC_BufDesc out_buf_desc = {};
