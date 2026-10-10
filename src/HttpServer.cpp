@@ -11,6 +11,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <iostream>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 //  Helpers
@@ -180,9 +182,115 @@ namespace
 HttpServer::HttpServer (AudioEngine& e, int p)
     : engine (e), port (p), instanceConfig (p)
 {
-    // Restore Icecast credentials for this port from disk (if any). This makes
-    // each radio remember its host/mount/auth/bitrate across restarts.
-    engine.getBroadcastSender().setConfig (instanceConfig.loadBroadcastConfig());
+    restore();
+}
+
+// Au demarrage : pilote, entree son (la Line de la carte virtuelle), source, ON AIR, reglage du traitement, puis les
+// envois coches « AutoConnect » se connectent seuls — l'instance remplace Oddcast sans qu'on touche a rien.
+void HttpServer::restore()
+{
+    const auto st = instanceConfig.load (AudioEngine::kNumEncoders);
+    for (int i = 0; i < AudioEngine::kNumEncoders; ++i)
+        engine.getBroadcastSender (i).setConfig (st.encoders[(size_t) i]);
+    if (! st.loaded) return;
+
+    if (st.driver.isNotEmpty() && st.driver != engine.getCurrentDriverType()) engine.setDriverType (st.driver);
+    if (st.input.isNotEmpty())  engine.setInputDevice (st.input);
+    if (st.output.isNotEmpty()) engine.setOutputDevice (st.output);
+    engine.setSource (st.source == "input" ? AudioEngine::Source::AudioInput
+                    : st.source == "file"  ? AudioEngine::Source::File : AudioEngine::Source::Generator);
+    engine.setMonitorEnabled (st.monitor);
+    if (st.dspJson.isNotEmpty()) PresetsStore::applyJson (st.dspJson, engine.getDsp());
+    engine.setOnAir (st.onAir);
+    for (int i = 0; i < AudioEngine::kNumEncoders; ++i)
+        if (st.encoders[(size_t) i].enabled) engine.getBroadcastSender (i).connect();
+    std::cout << "[UG6] etat restaure : entree « " << st.input << " », source " << st.source
+              << (st.onAir ? ", ON AIR" : "") << "\n" << std::flush;
+}
+
+void HttpServer::persist()
+{
+    const juce::ScopedLock sl (persistLock);
+    InstanceState st;
+    for (int i = 0; i < AudioEngine::kNumEncoders; ++i) st.encoders.push_back (engine.getBroadcastSender (i).getConfig());
+    st.driver  = engine.getCurrentDriverType();
+    st.input   = engine.getCurrentInputDevice();  if (st.input == "<default>")  st.input = {};
+    st.output  = engine.getCurrentOutputDevice(); if (st.output == "<default>") st.output = {};
+    st.source  = engine.getSource() == AudioEngine::Source::AudioInput ? "input"
+               : engine.getSource() == AudioEngine::Source::File ? "file" : "generator";
+    st.onAir   = engine.isOnAir();
+    st.monitor = engine.isMonitorEnabled();
+    st.dspJson = engine.getDsp().paramsToJson();
+    instanceConfig.save (st);
+}
+
+// « Importer depuis Oddcast » : lit les fichiers de reglage d'Oddcast (*.cfg, cle=valeur) du dossier donne et
+// recopie chaque encodeur (serveur, port, point de montage, mot de passe, format, debit). Les mots de passe
+// restent dans UG6 : la reponse n'en contient aucun.
+std::string HttpServer::importOddcast (const juce::String& folderPath)
+{
+    const juce::File folder (folderPath.trim().unquoted());
+    if (! folder.isDirectory()) return "{\"error\":\"dossier introuvable\"}";
+
+    auto files = folder.findChildFiles (juce::File::findFiles, true, "*.cfg");
+    files.sort();
+    struct Found { BroadcastSender::Config cfg; juce::String file, encode; };
+    std::vector<Found> found;
+    juce::String recDevice;
+
+    for (const auto& f : files)
+    {
+        juce::StringPairArray kv;
+        juce::StringArray lines; lines.addLines (f.loadFileAsString());
+        for (const auto& l : lines)
+        {
+            const int eq = l.indexOfChar ('=');
+            if (eq > 0) kv.set (l.substring (0, eq).trim().toLowerCase(), l.substring (eq + 1).trim());
+        }
+        for (const auto& k : { "advrecdevice", "windowsrecdevice", "recdevice", "recordingdevice" })
+            if (kv.containsKey (k) && kv[k].isNotEmpty() && recDevice.isEmpty()) recDevice = kv[k];
+
+        const auto mount = kv["servermountpoint"];
+        const auto host  = kv["server"].isNotEmpty() ? kv["server"] : kv["serverip"];
+        if (mount.isEmpty() || host.isEmpty()) continue;           // pas un encodeur
+
+        Found e; e.file = f.getFileName();
+        auto& c = e.cfg;
+        c.host  = host;
+        c.port  = kv["port"].isNotEmpty() ? kv["port"].getIntValue() : kv["serverport"].getIntValue();
+        c.mount = mount.startsWithChar ('/') ? mount : "/" + mount;
+        c.user  = kv["serveruser"].isNotEmpty() ? kv["serveruser"] : juce::String ("source");
+        c.password = kv["serverpassword"];
+        c.streamName  = kv["servername"].isNotEmpty() ? kv["servername"] : kv["serverdescription"];
+        c.streamGenre = kv["servergenre"];
+        c.bitrateKbps = kv["bitratenominal"].getIntValue() > 0 ? kv["bitratenominal"].getIntValue() : 128;
+        e.encode = kv["encode"].isNotEmpty() ? kv["encode"] : kv["encodertype"];
+        const auto enc = e.encode.toLowerCase().removeCharacters (" _-");
+        c.codec = enc.contains ("aac") && (enc.contains ("v2") || enc.contains ("ps")) ? BroadcastSender::Codec::AACPlusV2
+                : enc.contains ("aac") && (enc.contains ("+") || enc.contains ("plus") || enc.contains ("he")) ? BroadcastSender::Codec::AACPlus
+                : enc.contains ("aac") ? BroadcastSender::Codec::AAC : BroadcastSender::Codec::MP3;
+        c.enabled = false;                                          // on ne se connecte qu'a la demande (essai d'abord)
+        c.label   = juce::String (BroadcastSender::codecToString (c.codec)).toUpperCase() + " " + juce::String (c.bitrateKbps) + " " + c.mount;
+        found.push_back (e);
+        if ((int) found.size() >= AudioEngine::kNumEncoders) break;
+    }
+
+    juce::String j = "{\"input\":\"" + juce::String (jsonEscape (recDevice)) + "\",\"encoders\":[";
+    for (size_t i = 0; i < found.size(); ++i)
+    {
+        auto& s0 = engine.getBroadcastSender ((int) i);
+        s0.disconnect();
+        s0.setConfig (found[i].cfg);
+        const auto& c = found[i].cfg;
+        if (i > 0) j << ",";
+        j << "{\"file\":\"" << jsonEscape (found[i].file) << "\",\"encode\":\"" << jsonEscape (found[i].encode)
+          << "\",\"host\":\"" << jsonEscape (c.host) << "\",\"port\":" << c.port << ",\"mount\":\"" << jsonEscape (c.mount)
+          << "\",\"codec\":\"" << BroadcastSender::codecToString (c.codec) << "\",\"bitrate\":" << c.bitrateKbps
+          << ",\"passwordSet\":" << (c.password.isNotEmpty() ? "true" : "false") << "}";
+    }
+    j << "],\"files\":" << files.size() << "}";
+    if (! found.empty()) persist();
+    return j.toStdString();
 }
 HttpServer::~HttpServer() { stop(); }
 
@@ -248,8 +356,10 @@ std::string HttpServer::buildStateJson() const
             << ",\"out\":\""<< jsonEscape (engine.getCurrentOutputDevice()) << "\""
             << ",\"sampleRate\":" << engine.getCurrentSampleRate() << "}"
       << ",\"dsp\":"  << engine.getDsp().paramsToJson()
-      << ",\"broadcast\":" << engine.getBroadcastSender().toJson()
-      << "}";
+      << ",\"broadcast\":" << engine.getBroadcastSender (0).toJson();
+    s << ",\"encoders\":[";
+    for (int i = 0; i < AudioEngine::kNumEncoders; ++i) { if (i > 0) s << ","; s << engine.getBroadcastSender (i).toJson(); }
+    s << "]}";
     return s.toStdString();
 }
 
@@ -490,21 +600,26 @@ void HttpServer::setupRoutes()
         const auto parsed = juce::JSON::parse (juce::String (req.body));
         if (! parsed.isObject()) { res.status = 400; res.set_content ("invalid JSON", "text/plain"); return; }
 
-        BroadcastSender::Config cfg = engine.getBroadcastSender().getConfig();
+        const int idx = juce::jlimit (0, AudioEngine::kNumEncoders - 1,
+                                      req.has_param ("i") ? std::stoi (req.get_param_value ("i")) : static_cast<int> (parsed.getProperty ("index", 0)));
+        auto& sender = engine.getBroadcastSender (idx);
+        BroadcastSender::Config cfg = sender.getConfig();
         const auto get = [&parsed] (const char* k, const juce::var& fallback) { return parsed.getProperty (k, fallback); };
 
         cfg.host         = get ("host",     cfg.host).toString();
         cfg.port         = static_cast<int> (get ("port",       cfg.port));
         cfg.mount        = get ("mount",    cfg.mount).toString();
         cfg.user         = get ("user",     cfg.user).toString();
-        cfg.password     = get ("password", cfg.password).toString();
+        const auto pw    = get ("password", juce::var()).toString();
+        if (pw.isNotEmpty()) cfg.password = pw;            // vide = inchange (la page ne recoit jamais le mot de passe)
+        cfg.label        = get ("label",    cfg.label).toString();
         cfg.streamName   = get ("name",     cfg.streamName).toString();
         cfg.streamGenre  = get ("genre",    cfg.streamGenre).toString();
         cfg.bitrateKbps  = static_cast<int> (get ("bitrate",    cfg.bitrateKbps));
         cfg.codec        = BroadcastSender::codecFromString (get ("codec", juce::var (BroadcastSender::codecToString (cfg.codec))).toString());
 
-        engine.getBroadcastSender().setConfig (cfg);
-        instanceConfig.saveBroadcastConfig (cfg);   // persist immediately to disk
+        sender.setConfig (cfg);
+        persist();
         res.set_content (buildStateJson(), "application/json");
     });
 
@@ -517,14 +632,49 @@ void HttpServer::setupRoutes()
                              "text/plain");
             return;
         }
-        engine.getBroadcastSender().connect();
+        const int idx = req.has_param ("i") ? juce::jlimit (0, AudioEngine::kNumEncoders - 1, std::stoi (req.get_param_value ("i"))) : 0;
+        auto& sender = engine.getBroadcastSender (idx);
+        auto c = sender.getConfig(); c.enabled = true; sender.setConfig (c);    // AutoConnect, comme Oddcast
+        sender.connect();
+        persist();
         res.set_content (buildStateJson(), "application/json");
     });
 
     server->Post ("/api/broadcast/disconnect", [this] (const httplib::Request&, httplib::Response& res)
     {
-        engine.getBroadcastSender().disconnect();
+        const int idx = req.has_param ("i") ? juce::jlimit (0, AudioEngine::kNumEncoders - 1, std::stoi (req.get_param_value ("i"))) : 0;
+        auto& sender = engine.getBroadcastSender (idx);
+        auto c = sender.getConfig(); c.enabled = false; sender.setConfig (c);
+        sender.disconnect();
+        persist();
         res.set_content (buildStateJson(), "application/json");
+    });
+
+    // --- Titrage : le lecteur (UGPLAN Diff Web) envoie ici le titre en cours, pousse vers Icecast par chaque envoi ---
+    server->Post ("/api/metadata", [this] (const httplib::Request& req, httplib::Response& res)
+    {
+        auto song = juce::String::fromUTF8 (req.body.c_str(), static_cast<int> (req.body.size())).trim();
+        const auto parsed = juce::JSON::parse (song);
+        if (parsed.isObject()) song = parsed.getProperty ("song", "").toString().trim();
+        for (int i = 0; i < AudioEngine::kNumEncoders; ++i)
+            engine.getBroadcastSender (i).setMetadata (song);
+        res.set_content ("{\"ok\":true}", "application/json");
+    });
+
+    // --- Importer les reglages d'Oddcast (dossier d'installation / de config) ---
+    server->Post ("/api/oddcast/import", [this] (const httplib::Request& req, httplib::Response& res)
+    {
+        res.set_content (importOddcast (juce::String::fromUTF8 (req.body.c_str(), static_cast<int> (req.body.size()))), "application/json");
+    });
+
+    // Tout changement de reglage est garde sur le disque (redemarrage sans surveillance).
+    server->set_post_routing_handler ([this] (const httplib::Request& req, httplib::Response&)
+    {
+        if (req.method != "POST") return;
+        const auto& p = req.path;
+        if (p == "/api/onair" || p == "/api/monitor" || p == "/api/source" || p.rfind ("/api/device/", 0) == 0
+            || p == "/api/param" || p == "/api/preset" || p == "/api/preset/load")
+            persist();
     });
 
     // --- SSE meters ---

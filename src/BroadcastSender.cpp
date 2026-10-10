@@ -59,7 +59,7 @@ void BroadcastSender::prepare (double sr) { sampleRate = sr; }
 // ---------------------------------------------------------------------------
 void BroadcastSender::pushAudio (float* const* channels, int numCh, int numSamples)
 {
-   #if UG6_HAS_LAME
+   #if UG6_HAS_LAME || UG6_HAS_FDKAAC
     if (numSamples <= 0 || numCh <= 0) return;
     if (status.load (std::memory_order_relaxed) != Status::Connected) return;
 
@@ -99,6 +99,13 @@ BroadcastSender::Config BroadcastSender::getConfig() const
 {
     const juce::ScopedLock sl (configLock);
     return config;
+}
+
+void BroadcastSender::setMetadata (const juce::String& song)
+{
+    const juce::ScopedLock sl (songLock);
+    pendingSong = song;
+    songDirty.store (true);
 }
 
 void BroadcastSender::connect()    { wantsToBeConnected.store (true); }
@@ -185,28 +192,40 @@ bool BroadcastSender::openConnection()
             return aacEncoder_SetParam (aac, p, v) == AACENC_OK;
         };
 
-        // AAC-LC profile — universally supported by web/mobile players.
-        bool ok = setp (AACENC_AOT,         2 /* AOT_AAC_LC */);
-        ok    &= setp (AACENC_SAMPLERATE,   static_cast<juce::uint32> (sampleRate));
-        ok    &= setp (AACENC_CHANNELMODE,  2 /* MODE_2 stereo */);
-        ok    &= setp (AACENC_CHANNELORDER, 1 /* WAVE order */);
-        ok    &= setp (AACENC_BITRATE,      static_cast<juce::uint32> (cfg.bitrateKbps * 1000));
-        ok    &= setp (AACENC_TRANSMUX,     2 /* TT_MP4_ADTS — what Icecast expects */);
-        ok    &= setp (AACENC_AFTERBURNER,  1 /* better quality, slight CPU bump */);
-
-        if (! ok)
+        // AAC-LC (2), AAC+ v1 = HE-AAC / SBR (5), AAC+ v2 = HE-AAC v2 / SBR+PS (29), comme Oddcast.
+        // fdk-aac refuse l'AAC+ au-dela de ~64 kbps : on retombe alors sur le profil suivant (et on le dit).
+        const int wanted = cfg.codec == Codec::AACPlusV2 ? 29 : cfg.codec == Codec::AACPlus ? 5 : 2;
+        const int tries[3] = { wanted, wanted == 29 ? 5 : 2, 2 };
+        bool ok = false;
+        int  aot = 2;
+        for (int t = 0; t < 3 && ! ok; ++t)
         {
-            setError ("aacEncoder_SetParam() a échoué");
-            aacEncClose (&aac);
-            return false;
+            if (t > 0 && tries[t] == tries[t - 1]) continue;
+            if (t > 0) { aacEncClose (&aac); aac = nullptr; if (aacEncOpen (&aac, 0, 2) != AACENC_OK) break; }
+            aot = tries[t];
+            ok  = setp (AACENC_AOT,         static_cast<juce::uint32> (aot));
+            ok &= setp (AACENC_SAMPLERATE,   static_cast<juce::uint32> (sampleRate));
+            ok &= setp (AACENC_CHANNELMODE,  2 /* MODE_2 stereo (PS : stereo en entree) */);
+            ok &= setp (AACENC_CHANNELORDER, 1 /* WAVE order */);
+            ok &= setp (AACENC_BITRATE,      static_cast<juce::uint32> (cfg.bitrateKbps * 1000));
+            ok &= setp (AACENC_TRANSMUX,     2 /* TT_MP4_ADTS — what Icecast expects */);
+            ok &= setp (AACENC_AFTERBURNER,  1 /* better quality, slight CPU bump */);
+            ok = ok && aacEncEncode (aac, nullptr, nullptr, nullptr, nullptr) == AACENC_OK;
         }
 
-        if (aacEncEncode (aac, nullptr, nullptr, nullptr, nullptr) != AACENC_OK)
+        if (! ok || aac == nullptr)
         {
-            setError ("phase d'init de l'aacEncoder a échoué");
-            aacEncClose (&aac);
+            setError ("encodeur AAC : réglages refusés (débit " + juce::String (cfg.bitrateKbps) + " kbps)");
+            if (aac != nullptr) aacEncClose (&aac);
             return false;
         }
+        {
+            const juce::ScopedLock sl (songLock);
+            effectiveCodec = aot == 29 ? "aacplusv2" : aot == 5 ? "aacplus" : "aac";
+        }
+        if (aot != wanted)
+            setError (juce::String ("AAC+ refusé à ") + juce::String (cfg.bitrateKbps) + " kbps : envoi en "
+                      + (aot == 5 ? "AAC+ v1" : "AAC") + " (Oddcast fait pareil au-delà de ses limites)");
 
         AACENC_InfoStruct info {};
         if (aacEncInfo (aac, &info) == AACENC_OK)
@@ -243,7 +262,7 @@ bool BroadcastSender::openConnection()
     const auto password = cfg.password.trim();
     const auto credsB64 = juce::Base64::toBase64 (user + ":" + password);
 
-    const char* mimeType = (cfg.codec == Codec::MP3) ? "audio/mpeg" : "audio/aac";
+    const char* mimeType = (cfg.codec == Codec::MP3) ? "audio/mpeg" : (cfg.codec == Codec::AAC ? "audio/aac" : "audio/aacp");
 
     // Declare the bitstream sample rate that will reach the listener (44.1 kHz
     // for MP3 since LAME resamples; for AAC we still pass through at the input
@@ -272,10 +291,9 @@ bool BroadcastSender::openConnection()
               << "Endpoint : " << cfg.host << ":" << cfg.port << cfg.mount << "\n"
               << "User     : " << user << "\n"
               << "Password : " << password.length() << " chars\n"
-              << "B64 auth : " << credsB64 << "\n"
               << "Bytes    : " << headersLen << "\n"
               << "----- raw request -----\n"
-              << headers.toStdString()
+              << headers.replace (credsB64, "(masque)").toStdString()
               << "----------------------\n" << std::flush;
 
     if (sock->write (headersUtf8, headersLen) != headersLen)
@@ -344,6 +362,12 @@ bool BroadcastSender::openConnection()
     }
 
     socket = std::move (sock);
+    {
+        const juce::ScopedLock sl (songLock);       // re-pousser le titre en cours apres une (re)connexion
+        if (currentSong.isNotEmpty() && pendingSong.isEmpty()) pendingSong = currentSong;
+        if (pendingSong.isNotEmpty()) songDirty.store (true);
+        if (cfg.codec == Codec::MP3) effectiveCodec = "mp3";
+    }
     std::cout << "[Broadcast] >>> CONNECTED — waiting for audio chunks to encode and send...\n" << std::flush;
     return true;
 }
@@ -426,6 +450,9 @@ void BroadcastSender::senderThreadLoop()
             closeConnection();
             status.store (Status::Disconnected);
         }
+
+        if (status.load() == Status::Connected && songDirty.load())
+            sendMetadata();
 
         // Drain → encode → write
         if (status.load() == Status::Connected && fifo.getNumReady() >= kChunkSamples)
@@ -577,7 +604,39 @@ void BroadcastSender::senderThreadLoop()
     closeConnection();
 }
 
+// Titrage : comme Oddcast, une requete a part vers Icecast (GET /admin/metadata?mode=updinfo), avec les memes
+// identifiants que la source. Un echec n'interrompt jamais le flux.
+void BroadcastSender::sendMetadata()
+{
+    juce::String song;
+    {
+        const juce::ScopedLock sl (songLock);
+        song = pendingSong; songDirty.store (false);
+    }
+    const Config cfg = getConfig();
+    juce::StreamingSocket s;
+    if (! s.connect (cfg.host, cfg.port, 3000)) { std::cout << "[Metadata] connexion impossible\n" << std::flush; return; }
+    const auto creds = juce::Base64::toBase64 (cfg.user.trim() + ":" + cfg.password.trim());
+    juce::String req;
+    req << "GET /admin/metadata?mount=" << juce::URL::addEscapeChars (cfg.mount.trim(), true)
+        << "&mode=updinfo&charset=UTF-8&song=" << juce::URL::addEscapeChars (song, true) << " HTTP/1.0\r\n"
+        << "Host: " << cfg.host << "\r\n"
+        << "Authorization: Basic " << creds << "\r\n"
+        << "User-Agent: libshout/2.4.6\r\n\r\n";
+    s.write (req.toRawUTF8(), static_cast<int> (req.getNumBytesAsUTF8()));
+    char buf[256] = {};
+    if (s.waitUntilReady (true, 3000) > 0) s.read (buf, sizeof (buf) - 1, false);
+    s.close();
+    const juce::String first = juce::String (buf).upToFirstOccurrenceOf ("\r\n", false, false);
+    std::cout << "[Metadata] " << song << " -> " << first << "\n" << std::flush;
+    const juce::ScopedLock sl (songLock);
+    currentSong = song;
+    if (pendingSong == song) pendingSong = {};
+}
+
 #else  // ---------- stub when neither LAME nor fdk-aac is available ----------
+
+void BroadcastSender::sendMetadata() {}
 
 bool BroadcastSender::openConnection()  { return false; }
 void BroadcastSender::closeConnection() {}
@@ -596,6 +655,8 @@ namespace
 juce::String BroadcastSender::toJson() const
 {
     const Config c = getConfig();
+    juce::String song, eff;
+    { const juce::ScopedLock sl (songLock); song = currentSong; eff = effectiveCodec; }
     juce::String j;
     j << "{"
       << "\"available\":"   << (isAvailable() ? "true" : "false")
@@ -603,12 +664,16 @@ juce::String BroadcastSender::toJson() const
       << ",\"reconnects\":"  << reconnects.load()
       << ",\"bytesSent\":"   << bytesSent.load()
       << ",\"lastError\":\"" << esc (getLastError()) << "\""
+      << ",\"song\":\""     << esc (song) << "\""
+      << ",\"effectiveCodec\":\"" << esc (eff) << "\""
       << ",\"config\":{"
             << "\"host\":\""     << esc (c.host)        << "\""
             << ",\"port\":"      << c.port
             << ",\"mount\":\""   << esc (c.mount)       << "\""
             << ",\"user\":\""    << esc (c.user)        << "\""
-            << ",\"password\":\""<< esc (c.password)    << "\""
+            << ",\"passwordSet\":" << (c.password.isNotEmpty() && c.password != "hackme" ? "true" : "false")   // jamais le mot de passe lui-meme
+            << ",\"enabled\":"   << (c.enabled ? "true" : "false")
+            << ",\"label\":\""  << esc (c.label) << "\""
             << ",\"name\":\""    << esc (c.streamName)  << "\""
             << ",\"genre\":\""   << esc (c.streamGenre) << "\""
             << ",\"bitrate\":"   << c.bitrateKbps

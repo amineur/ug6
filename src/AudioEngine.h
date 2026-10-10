@@ -7,6 +7,7 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 
+#include <array>
 #include <atomic>
 
 /**
@@ -35,8 +36,10 @@ public:
     FilePlayer& getFilePlayer() noexcept { return filePlayer; }
     const FilePlayer& getFilePlayer() const noexcept { return filePlayer; }
 
-    BroadcastSender& getBroadcastSender() noexcept { return broadcaster; }
-    const BroadcastSender& getBroadcastSender() const noexcept { return broadcaster; }
+    // Plusieurs envois par radio, comme la liste « Encoder Settings » d'Oddcast (ex. MP3 256 + AAC 128).
+    static constexpr int kNumEncoders = 4;
+    BroadcastSender& getBroadcastSender (int i = 0) noexcept { return broadcasters[(size_t) juce::jlimit (0, kNumEncoders - 1, i)]; }
+    const BroadcastSender& getBroadcastSender (int i = 0) const noexcept { return broadcasters[(size_t) juce::jlimit (0, kNumEncoders - 1, i)]; }
 
     // ---- master state ----
     void  setOnAir (bool v)              { onAir.store (v, std::memory_order_relaxed); }
@@ -94,7 +97,7 @@ private:
     juce::AudioDeviceManager deviceManager;
     DspChain dsp;
     FilePlayer filePlayer;
-    BroadcastSender broadcaster;
+    std::array<BroadcastSender, kNumEncoders> broadcasters;
 
     std::atomic<bool>   onAir          { false };
     std::atomic<bool>   monitorEnabled { false };  // off by default for multi-instance setups

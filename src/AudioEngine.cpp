@@ -64,6 +64,7 @@ juce::String AudioEngine::setInputDevice (const juce::String& name)
     auto setup = deviceManager.getAudioDeviceSetup();
     setup.inputDeviceName = name;
     setup.useDefaultInputChannels = true;
+    setup.sampleRate = 44100.0;          // comme Oddcast (« 44100Hz/Stereo »)
     return deviceManager.setAudioDeviceSetup (setup, true);
 }
 
@@ -72,6 +73,7 @@ juce::String AudioEngine::setOutputDevice (const juce::String& name)
     auto setup = deviceManager.getAudioDeviceSetup();
     setup.outputDeviceName = name;
     setup.useDefaultOutputChannels = true;
+    setup.sampleRate = 44100.0;
     return deviceManager.setAudioDeviceSetup (setup, true);
 }
 
@@ -108,7 +110,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const int blockSize = device->getCurrentBufferSizeSamples();
     dsp.prepare (sampleRate, blockSize, 2);
     filePlayer.prepare (sampleRate, blockSize);
-    broadcaster.prepare (sampleRate);
+    for (auto& b : broadcasters) b.prepare (sampleRate);
 
     silenceBuffer.setSize (2, blockSize, false, true, true);
     silenceBuffer.clear();
@@ -191,14 +193,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs,
 
     if (onAirNow)
     {
-        broadcaster.pushAudio (outputs, numOutputChannels, numSamples);
+        for (auto& b : broadcasters) b.pushAudio (outputs, numOutputChannels, numSamples);
     }
     else
     {
         // Pre-allocated zero buffer — no allocation in audio thread.
         float* silentChans[2] = { silenceBuffer.getWritePointer (0),
                                   silenceBuffer.getWritePointer (1) };
-        broadcaster.pushAudio (silentChans, 2, numSamples);
+        for (auto& b : broadcasters) b.pushAudio (silentChans, 2, numSamples);
     }
 
     // ---------- 4. Monitor gate — mute the speakers if monitoring disabled ----------

@@ -32,7 +32,8 @@ class BroadcastSender
 {
 public:
     enum class Status { Disabled, Disconnected, Connecting, Connected, Error };
-    enum class Codec  { MP3, AAC };
+    // MP3 (LAME), AAC-LC, AAC+ v1 (HE-AAC, SBR), AAC+ v2 (HE-AAC v2, SBR+PS) — les formats d'Oddcast.
+    enum class Codec  { MP3, AAC, AACPlus, AACPlusV2 };
 
     struct Config
     {
@@ -45,11 +46,22 @@ public:
         juce::String streamGenre { "Various" };
         int          bitrateKbps { 128 };
         Codec        codec       { Codec::MP3 };
+        bool         enabled     { false };   // « AutoConnect » : se connecte au demarrage et se reconnecte seul
+        juce::String label;                   // libelle libre (ex. « Kompa MP3 256 »)
     };
 
     /** Returns "mp3" or "aac" — used by the JSON layer. */
-    static const char* codecToString (Codec c) noexcept { return c == Codec::MP3 ? "mp3" : "aac"; }
-    static Codec       codecFromString (const juce::String& s) noexcept { return s == "aac" ? Codec::AAC : Codec::MP3; }
+    static const char* codecToString (Codec c) noexcept
+    {
+        switch (c) { case Codec::AAC: return "aac"; case Codec::AACPlus: return "aacplus"; case Codec::AACPlusV2: return "aacplusv2"; default: return "mp3"; }
+    }
+    static Codec codecFromString (const juce::String& s) noexcept
+    {
+        if (s == "aac") return Codec::AAC;
+        if (s == "aacplus") return Codec::AACPlus;
+        if (s == "aacplusv2") return Codec::AACPlusV2;
+        return Codec::MP3;
+    }
 
     BroadcastSender();
     ~BroadcastSender();
@@ -67,6 +79,9 @@ public:
 
     void connect();
     void disconnect();
+
+    /** Titre en cours (« Artiste - Titre »), envoye a Icecast comme Oddcast (/admin/metadata, mode updinfo). */
+    void setMetadata (const juce::String& song);
 
     Status        getStatus()      const { return status.load (std::memory_order_relaxed); }
     juce::String  getStatusText()  const;
@@ -98,6 +113,12 @@ private:
     std::atomic<bool> running            { false };
     std::atomic<bool> wantsToBeConnected { false };
     std::thread senderThread;
+
+    // Titrage en attente d'envoi (fil d'envoi) + format reellement utilise (AAC+ refuse -> repli).
+    juce::String pendingSong, currentSong, effectiveCodec;
+    std::atomic<bool> songDirty { false };
+    mutable juce::CriticalSection songLock;
+    void sendMetadata();
 
     juce::AbstractFifo       fifo       { 65536 };
     juce::AudioBuffer<float> ringBuffer { 2, 65536 };

@@ -44,6 +44,9 @@ private:
     void setupRoutes();
     std::string buildStateJson() const;
     std::string buildDevicesJson() const;
+    void persist();                                   // ecrit tout l'etat de l'instance (comme Oddcast a la fermeture)
+    void restore();                                   // au demarrage : reprend la ou on etait (sans surveillance)
+    std::string importOddcast (const juce::String& folder);
 
     AudioEngine& engine;
     int port;
@@ -53,4 +56,5 @@ private:
     std::unique_ptr<httplib::Server> server;
     std::thread listenerThread;
     std::atomic<bool> running { false };
+    juce::CriticalSection persistLock;
 };

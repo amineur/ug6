@@ -106,6 +106,12 @@ juce::String PresetsStore::load (const juce::String& name, DspChain& dsp)
     return {};
 }
 
+void PresetsStore::applyJson (const juce::String& json, DspChain& dsp)
+{
+    const auto parsed = juce::JSON::parse (json);
+    if (parsed.isObject()) applyJsonRecursively (parsed.getProperty ("dsp", parsed), {}, dsp);
+}
+
 juce::StringArray PresetsStore::listNames() const
 {
     juce::StringArray names;

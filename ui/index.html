@@ -452,120 +452,76 @@
       </div>
     </section>
 
-    <!-- ============================ ICECAST BROADCAST ============================ -->
+    <!-- ============================ ENVOIS (REMPLACE ODDCAST) ============================ -->
     <section class="panel p-3">
       <div class="flex items-center justify-between mb-2">
-        <h3>Diffusion Icecast · MP3 push</h3>
-        <div class="flex items-center gap-2 text-[11px] mono">
-          <div :class="bcLedClass()" class="led"></div>
-          <span :class="bcStatusTextClass()" x-text="state.broadcast.status"></span>
-          <span class="text-gray-600" x-show="state.broadcast.reconnects > 0" x-text="'· ' + state.broadcast.reconnects + ' reconnects'"></span>
-        </div>
+        <h3>Envois vers Infomaniak · remplace Oddcast</h3>
+        <div class="text-[10px] text-gray-500 mono" x-show="(state.encoders[0]||{}).song">♪ <span class="text-gray-300" x-text="(state.encoders[0]||{}).song"></span></div>
       </div>
 
-      <!-- Lib missing banner -->
-      <div x-show="!state.broadcast.available" class="bg-amber-900/30 border border-amber-700/50 rounded p-3 text-[11px] text-amber-300 mb-2 space-y-2">
-        <div class="font-semibold">⚠ Encoder MP3 indisponible dans ce binaire.</div>
-        <div class="text-amber-200/80">Installe LAME puis rebuild :</div>
-        <div>
-          <div class="text-[10px] text-amber-400/70 mb-0.5">1 · installer LAME (une fois)</div>
-          <pre class="bg-black/50 p-2 rounded font-mono text-[11px] text-amber-100 whitespace-pre-wrap select-all">brew install lame</pre>
-        </div>
-        <div>
-          <div class="text-[10px] text-amber-400/70 mb-0.5">2 · rebuild</div>
-          <pre class="bg-black/50 p-2 rounded font-mono text-[11px] text-amber-100 whitespace-pre-wrap select-all">cd ~/Documents/Claude/Projects/UG6
-cmake -B build
-cmake --build build -j</pre>
-        </div>
+      <div x-show="!state.broadcast.available" class="bg-amber-900/30 border border-amber-700/50 rounded p-3 text-[11px] text-amber-300 mb-2">
+        ⚠ Encodeurs indisponibles dans ce binaire (LAME / fdk-aac absents).
       </div>
 
-      <div x-show="state.broadcast.available" class="grid grid-cols-12 gap-x-2 gap-y-2 text-[11px]">
-        <!-- Row 1: Host + Port + Mount + Bitrate -->
-        <div class="col-span-4">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Host</label>
-          <input type="text" x-model="bc.host" @blur="saveBroadcastConfig()"
-                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500"
-                 placeholder="icecast.exemple.com" />
+      <!-- Importer depuis Oddcast -->
+      <div class="flex items-end gap-2 text-[11px] mb-3 pb-3 border-b border-gray-800">
+        <div class="flex-1">
+          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Dossier des réglages Oddcast (fichiers .cfg)</label>
+          <input type="text" x-model="oddFolder" class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
         </div>
-        <div class="col-span-2">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Port</label>
-          <input type="number" x-model.number="bc.port" @blur="saveBroadcastConfig()"
-                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
-        </div>
-        <div class="col-span-3">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Mount</label>
-          <input type="text" x-model="bc.mount" @blur="saveBroadcastConfig()"
-                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500"
-                 placeholder="/stream" />
-        </div>
-        <div class="col-span-2">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Bitrate</label>
-          <select x-model.number="bc.bitrate" @change="saveBroadcastConfig()" class="w-full">
-            <template x-for="b in [64,96,128,192,256,320]" :key="b">
-              <option :value="b" x-text="b + ' kbps'"></option>
-            </template>
-          </select>
-        </div>
-        <div class="col-span-1">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Codec</label>
-          <select x-model="bc.codec" @change="saveBroadcastConfig()" class="w-full">
-            <option value="mp3">MP3</option>
-            <option value="aac">AAC</option>
-          </select>
-        </div>
+        <button @click="importOddcast()" class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-xs font-bold rounded">⇩ Importer depuis Oddcast</button>
+      </div>
+      <div class="text-[10px] mono mb-3" x-show="oddMsg" :class="oddErr ? 'text-red-400' : 'text-gray-400'" x-text="oddMsg"></div>
 
-        <!-- Row 2: User + Password -->
-        <div class="col-span-3">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">User</label>
-          <input type="text" x-model="bc.user" @blur="saveBroadcastConfig()"
-                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500"
-                 placeholder="source" />
-        </div>
-        <div class="col-span-3">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Password</label>
-          <input type="password" x-model="bc.password" @blur="saveBroadcastConfig()"
-                 class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
-        </div>
-        <div class="col-span-4">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Nom du stream</label>
-          <input type="text" x-model="bc.name" @blur="saveBroadcastConfig()"
-                 class="w-full bg-gray-800 px-2 py-1 rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
-        </div>
-        <div class="col-span-2">
-          <label class="text-gray-500 text-[10px] uppercase tracking-wider">Genre</label>
-          <input type="text" x-model="bc.genre" @blur="saveBroadcastConfig()"
-                 class="w-full bg-gray-800 px-2 py-1 rounded text-gray-200 outline-none focus:ring-1 focus:ring-amber-500" />
-        </div>
-
-        <!-- Action row + stats -->
-        <div class="col-span-12 flex items-center justify-between pt-2 border-t border-gray-800 mt-1">
-          <div class="text-[10px] text-gray-500 mono">
-            <span x-show="state.broadcast.bytesSent > 0">📡 envoyé : <span class="text-gray-300" x-text="formatBytes(state.broadcast.bytesSent)"></span></span>
+      <template x-for="(e, i) in encs" :key="i">
+        <div class="grid grid-cols-12 gap-x-2 gap-y-1.5 text-[11px] mb-3 pb-3 border-b border-gray-800">
+          <div class="col-span-12 flex items-center gap-2 mono">
+            <div :class="ledClass((state.encoders[i]||{}).status)" class="led"></div>
+            <b class="text-gray-300" x-text="'Envoi ' + (i+1)"></b>
+            <input type="text" x-model="e.label" @blur="saveEnc(i)" placeholder="libellé (ex. Kompa MP3 256)" class="flex-1 bg-transparent text-gray-400 outline-none" />
+            <span :class="statusTextClass((state.encoders[i]||{}).status)" x-text="(state.encoders[i]||{}).status"></span>
+            <span class="text-gray-600" x-show="(state.encoders[i]||{}).bytesSent > 0" x-text="'· ' + formatBytes((state.encoders[i]||{}).bytesSent)"></span>
+            <span class="text-gray-600" x-show="((state.encoders[i]||{}).config||{}).enabled">· auto</span>
           </div>
-          <div class="flex gap-1">
-            <button @click="bcConnect()"
-                    x-show="state.broadcast.status !== 'connecté' && state.broadcast.status !== 'connexion…'"
-                    class="px-5 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded tracking-wider">▶ CONNECTER</button>
-            <button @click="bcDisconnect()"
-                    x-show="state.broadcast.status === 'connecté' || state.broadcast.status === 'connexion…'"
-                    class="px-5 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded tracking-wider">⏹ DÉCONNECTER</button>
+          <div class="col-span-4"><label class="text-gray-500 text-[10px] uppercase">Serveur</label>
+            <input type="text" x-model="e.host" @blur="saveEnc(i)" class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none" placeholder="xxx.ice.infomaniak.ch" /></div>
+          <div class="col-span-1"><label class="text-gray-500 text-[10px] uppercase">Port</label>
+            <input type="number" x-model.number="e.port" @blur="saveEnc(i)" class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none" /></div>
+          <div class="col-span-3"><label class="text-gray-500 text-[10px] uppercase">Point de montage</label>
+            <input type="text" x-model="e.mount" @blur="saveEnc(i)" class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none" placeholder="/radio-128.mp3" /></div>
+          <div class="col-span-2"><label class="text-gray-500 text-[10px] uppercase">Format</label>
+            <select x-model="e.codec" @change="saveEnc(i)" class="w-full">
+              <option value="mp3">MP3</option><option value="aac">AAC</option><option value="aacplus">AAC+ v1 (HE)</option><option value="aacplusv2">AAC+ v2 (HE v2)</option>
+            </select></div>
+          <div class="col-span-2"><label class="text-gray-500 text-[10px] uppercase">Débit</label>
+            <select x-model.number="e.bitrate" @change="saveEnc(i)" class="w-full">
+              <template x-for="b in [32,48,64,96,128,192,256,320]" :key="b"><option :value="b" x-text="b + ' kbps'"></option></template>
+            </select></div>
+          <div class="col-span-2"><label class="text-gray-500 text-[10px] uppercase">Utilisateur</label>
+            <input type="text" x-model="e.user" @blur="saveEnc(i)" class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none" placeholder="source" /></div>
+          <div class="col-span-3"><label class="text-gray-500 text-[10px] uppercase">Mot de passe</label>
+            <input type="password" x-model="e.password" @blur="saveEnc(i)" autocomplete="new-password"
+                   :placeholder="((state.encoders[i]||{}).config||{}).passwordSet ? '(enregistré — vide = inchangé)' : ''"
+                   class="w-full bg-gray-800 px-2 py-1 mono rounded text-gray-200 outline-none" /></div>
+          <div class="col-span-4"><label class="text-gray-500 text-[10px] uppercase">Nom du flux</label>
+            <input type="text" x-model="e.name" @blur="saveEnc(i)" class="w-full bg-gray-800 px-2 py-1 rounded text-gray-200 outline-none" /></div>
+          <div class="col-span-3 flex items-end justify-end gap-1">
+            <button @click="encConnect(i)" x-show="!['connecté','connexion…'].includes((state.encoders[i]||{}).status)"
+                    class="px-4 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded">▶ CONNECTER</button>
+            <button @click="encDisconnect(i)" x-show="['connecté','connexion…'].includes((state.encoders[i]||{}).status)"
+                    class="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded">⏹ DÉCONNECTER</button>
           </div>
+          <div class="col-span-12 text-[10px] text-red-400 mono" x-show="(state.encoders[i]||{}).lastError">⚠ <span x-text="(state.encoders[i]||{}).lastError"></span></div>
         </div>
-
-        <!-- Error line -->
-        <div class="col-span-12 text-[10px] text-red-400 mono" x-show="state.broadcast.lastError">
-          ⚠ <span x-text="state.broadcast.lastError"></span>
-        </div>
-
-        <p class="col-span-12 text-[9px] text-gray-600 mono">
-          Quand connecté, le signal post-DSP est encodé en MP3 et poussé sur ton serveur Icecast.
-          ON AIR off ▶ silence dans le stream (la connexion reste ouverte).
-        </p>
-      </div>
+      </template>
+      <p class="text-[9px] text-gray-600 mono">
+        Comme Oddcast : chaque envoi connecté se reconnecte seul et repart au redémarrage (AutoConnect). ON AIR off ▶ silence dans le flux.
+        Le titre en cours arrive du lecteur UGPLAN Diff Web et part chez Infomaniak sur chaque envoi.
+      </p>
     </section>
 
     <footer class="text-center text-[10px] text-gray-700 pt-2 mono">
-      UG6 Broadcaster v0.3 · DSP chain + presets utilisateur + push Icecast MP3
+      UG6 Broadcaster v0.4 · traitement + envois Infomaniak (remplace Oddcast)
     </footer>
   </div>
 
@@ -594,8 +550,13 @@ function app() {
       device: { in: '', out: '', sampleRate: 48000 },
       broadcast: { available: false, status: 'déconnecté', reconnects: 0, bytesSent: 0, lastError: '',
                    config: { host: 'localhost', port: 8000, mount: '/stream', user: 'source', password: '', name: 'UG6', genre: '', bitrate: 128 } },
+      encoders: [],
       dsp: emptyDsp()
     },
+    encs: [0,1,2,3].map(() => ({ label: '', host: '', port: 80, mount: '', user: 'source', password: '', name: '', genre: '', bitrate: 128, codec: 'mp3' })),
+    encsSynced: false,
+    oddFolder: 'C:\\Program Files (x86)\\oddcastv3',
+    oddMsg: '', oddErr: false,
     devices: { in: [], out: [] },
     userPresets: [],
     newPresetName: '',
@@ -637,6 +598,10 @@ function app() {
       if (!this.bcSynced && s.broadcast && s.broadcast.config) {
         Object.assign(this.bc, s.broadcast.config);
         this.bcSynced = true;
+      }
+      if (!this.encsSynced && Array.isArray(s.encoders) && s.encoders.length) {
+        s.encoders.forEach((e, i) => { if (this.encs[i] && e.config) Object.assign(this.encs[i], e.config, { password: '' }); });
+        this.encsSynced = true;
       }
     },
 
@@ -729,7 +694,38 @@ function app() {
       }
     },
 
-    // --- Icecast broadcast ---
+    // --- Envois (plusieurs, comme Oddcast) ---
+    async saveEnc(i) {
+      const e = { ...this.encs[i], index: i };
+      if (!e.password) delete e.password;               // vide = inchange
+      const r = await fetch('/api/broadcast/config?i=' + i, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(e) });
+      if (r.ok) { this.applyState(await r.json()); this.encs[i].password = ''; }
+    },
+    async encConnect(i) {
+      await this.saveEnc(i);
+      const r = await fetch('/api/broadcast/connect?i=' + i, { method: 'POST' });
+      if (r.ok) this.applyState(await r.json()); else alert(await r.text());
+    },
+    async encDisconnect(i) {
+      const r = await fetch('/api/broadcast/disconnect?i=' + i, { method: 'POST' });
+      if (r.ok) this.applyState(await r.json());
+    },
+    async importOddcast() {
+      this.oddMsg = 'Lecture…'; this.oddErr = false;
+      try {
+        const r = await fetch('/api/oddcast/import', { method: 'POST', body: this.oddFolder });
+        const j = await r.json();
+        if (j.error) { this.oddMsg = 'Import impossible : ' + j.error; this.oddErr = true; return; }
+        if (!j.encoders.length) { this.oddMsg = j.files + ' fichier(s) .cfg lu(s), aucun encodeur trouvé dans ce dossier.'; this.oddErr = true; return; }
+        this.oddMsg = j.encoders.length + ' envoi(s) importé(s) : ' + j.encoders.map(e => `${e.encode || e.codec} ${e.bitrate}k ${e.mount}` + (e.passwordSet ? '' : ' (sans mot de passe)')).join(' · ')
+                    + (j.input ? ` — entrée son d'Oddcast : « ${j.input} »` : '') + '. Vérifiez puis connectez.';
+        this.encsSynced = false; await this.refreshState();
+      } catch (e) { this.oddMsg = 'Import impossible'; this.oddErr = true; }
+    },
+    ledClass(s) { return s === 'connecté' ? 'led-on' : s === 'connexion…' ? 'bg-amber-400' : s === 'erreur' ? 'bg-red-500' : 'led-off'; },
+    statusTextClass(s) { return s === 'connecté' ? 'text-green-400' : s === 'connexion…' ? 'text-amber-400' : s === 'erreur' ? 'text-red-400' : 'text-gray-400'; },
+
+    // --- Icecast broadcast (ancien envoi unique, garde pour compatibilite) ---
     async saveBroadcastConfig() {
       const payload = { ...this.bc };
       try {

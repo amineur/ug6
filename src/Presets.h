@@ -34,6 +34,9 @@ public:
     /** Names of all user presets currently on disk (sorted). */
     juce::StringArray listNames() const;
 
+    /** Applique un reglage JSON (format de DspChain::paramsToJson) — restauration au demarrage. */
+    static void applyJson (const juce::String& json, DspChain& dsp);
+
     /** Delete a preset. Returns true on success. */
     bool remove (const juce::String& name);
 

@@ -58,7 +58,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-${{ runner.os }}-mp3lame-fdkaac-v4
+          key: vcpkg-${{ runner.os }}-mp3lame-fdkaac-heaac-v5
 
       - name: Setup vcpkg (clean install dir)
         shell: pwsh
@@ -78,7 +78,7 @@ jobs:
       - name: vcpkg install LAME + fdk-aac
         shell: pwsh
         run: |
-          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows fdk-aac:x64-windows
+          & "C:\vcpkg\vcpkg.exe" install mp3lame:x64-windows "fdk-aac[he-aac]:x64-windows"
 
       - name: Configure CMake (vcpkg toolchain)
         shell: pwsh

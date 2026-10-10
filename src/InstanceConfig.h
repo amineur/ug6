@@ -4,18 +4,28 @@
 
 #include <juce_core/juce_core.h>
 
+#include <vector>
+
 /**
- *  Per-instance persistent configuration.
- *
- *  Each UG6 process is associated with a port (8000, 8001, …). The instance
- *  config is keyed on that port and stored under :
+ *  Per-instance persistent configuration (une instance = une radio = un port).
  *    macOS : ~/Library/Application Support/UG6Broadcaster/instances/config-port-<N>.json
  *    Win   : %APPDATA%/Roaming/UG6Broadcaster/instances/config-port-<N>.json
  *
- *  Currently saves the Icecast push config (host, port, mount, auth, bitrate, …).
- *  Layout uses a top-level envelope so we can add more sections later without
- *  breaking existing files.
+ *  Pour remplacer Oddcast sans surveillance, tout est garde : les envois (Encoder Settings + AutoConnect), le pilote
+ *  et l'entree son (la Line de la carte virtuelle), la source, ON AIR et le reglage du traitement. Au redemarrage,
+ *  l'instance repart toute seule. Ancien format (une seule section « icecast ») relu comme premier envoi.
  */
+struct InstanceState
+{
+    std::vector<BroadcastSender::Config> encoders;
+    juce::String driver, input, output;
+    juce::String source { "generator" };     // generator | input | file
+    bool onAir   { false };
+    bool monitor { false };
+    juce::String dspJson;                     // DspChain::paramsToJson()
+    bool loaded  { false };                   // un fichier existait
+};
+
 class InstanceConfig
 {
 public:
@@ -23,11 +33,8 @@ public:
 
     juce::File getConfigFile() const { return configFile; }
 
-    /** Returns a default-constructed Config if no file exists yet. */
-    BroadcastSender::Config loadBroadcastConfig() const;
-
-    /** Writes the icecast section to disk. Atomic-ish via JUCE replaceWithText. */
-    bool saveBroadcastConfig (const BroadcastSender::Config& cfg) const;
+    InstanceState load (int numEncoders) const;
+    bool save (const InstanceState& st) const;
 
 private:
     juce::File configFile;
