@@ -432,6 +432,18 @@
                 <input type="range" min="5" max="500" step="5" :value="state.dsp.lim.releaseMs" @input="setParam('lim.releaseMs', $event.target.value)" class="w-full accent-red-500 mt-1" />
               </div>
             </div>
+            <!-- Anti-saturation (11/10/2026) : anticipation + crete reelle -->
+            <div class="grid grid-cols-2 gap-3 text-[10px] mt-3">
+              <div>
+                <label class="flex items-center gap-2 text-gray-400"><input type="checkbox" :checked="state.dsp.lim.lookahead" @change="setParam('lim.lookahead', $event.target.checked ? 1 : 0)" class="accent-red-500" /> Anticipation (anti-saturation)</label>
+                <div class="flex justify-between mt-1"><span class="text-gray-500">Avance</span><span class="mono text-gray-300" x-text="(state.dsp.lim.lookaheadMs ?? 5).toFixed(1) + ' ms'"></span></div>
+                <input type="range" min="1" max="20" step="0.5" :value="state.dsp.lim.lookaheadMs" @input="setParam('lim.lookaheadMs', $event.target.value)" :disabled="!state.dsp.lim.lookahead" class="w-full accent-red-500 mt-1" />
+              </div>
+              <div>
+                <label class="flex items-center gap-2 text-gray-400"><input type="checkbox" :checked="state.dsp.lim.truePeak" @change="setParam('lim.truePeak', $event.target.checked ? 1 : 0)" class="accent-red-500" /> Crêtes réelles (true peak)</label>
+                <div class="text-gray-600 mt-1 leading-tight">Évite les crêtes qui dépassent après l'encodage MP3 / AAC.</div>
+              </div>
+            </div>
           </div>
 
           <div class="panel p-3">
@@ -534,7 +546,7 @@ function emptyDsp() {
     eq: Array.from({length: 4}, () => ({ on: true, freq: 1000, gainDb: 0, q: 1 })),
     xover: [100, 300, 800, 2500, 8000],
     comp: Array.from({length: 6}, () => ({ thresholdDb: -18, ratio: 2, attackMs: 20, releaseMs: 150, makeupDb: 0, gr: 0 })),
-    lim: { ceilingDb: -0.5, releaseMs: 60, gr: 0 },
+    lim: { ceilingDb: -1.0, releaseMs: 60, lookahead: true, lookaheadMs: 5, truePeak: true, gr: 0 },
     meters: { in: {peakL:0, peakR:0, rmsL:0, rmsR:0}, out: {peakL:0, peakR:0, rmsL:0, rmsR:0} }
   };
 }

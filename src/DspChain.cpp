@@ -68,6 +68,7 @@ void DspChain::prepare (double sr, int blockSize, int channels)
     agc.prepare (sr);
     for (auto& c : bandComps) c.prepare (sr);
     limiter.prepare (sr);
+    resetLookahead (juce::jlimit (16, kMaxLook - 1, (int) std::round (limLookaheadMs.load() * 0.001 * sr)));
 
     midBuf.setSize (numChannels, blockSize, false, true, true);
     midBuf.clear();
@@ -102,6 +103,15 @@ void DspChain::reset()
 
     for (auto& ch : midBp) for (auto& q : ch) q.reset();
     rmsInLSmooth = rmsInRSmooth = rmsOutLSmooth = rmsOutRSmooth = 0.0f;
+}
+
+void DspChain::resetLookahead (int n)
+{
+    laLen = n; laPos = 0; laSum = (double) n; laRel = 1.0f;
+    for (auto& c : laSig) c.fill (0.0f);
+    for (auto& c : laMid) c.fill (0.0f);
+    laReq.fill (1.0f); laMin.fill (1.0f);
+    for (int ch = 0; ch < 2; ++ch) laPrev[ch] = laPrev2[ch] = laPrev3[ch] = 0.0f;
 }
 
 // Passe-bande RBJ (gain 0 dB au centre), Q = 2, deux cellules : -3 dB vers 14 et 23 Hz, < -20 dB a 36 Hz.
@@ -361,7 +371,9 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
     const float outGainLin = juce::Decibels::decibelsToGain (outputGainDb.load (std::memory_order_relaxed));
     buffer.applyGain (outGainLin);
 
-    // ---------- 8. Brick-wall limiter ----------
+    // ---------- 8. Limiteur ----------
+    const bool look = limLookahead.load (std::memory_order_relaxed);
+    if (! look)
     {
         limiter.updateCoefs (1.0f /* fast attack ≈ 1 ms */,
                              limReleaseMs.load (std::memory_order_relaxed));
@@ -378,6 +390,67 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
             if (R) R[i] *= g;
         }
         limGrDb.store (limiter.currentGrDb(), std::memory_order_relaxed);
+    }
+    else
+    {
+        // Longueur d'anticipation (echantillons), recalee si le reglage change
+        const int n = juce::jlimit (16, kMaxLook - 1, (int) std::round (limLookaheadMs.load (std::memory_order_relaxed) * 0.001 * sampleRate));
+        if (n != laLen) resetLookahead (n);
+        const float ceilLin = juce::Decibels::decibelsToGain (limCeilingDb.load (std::memory_order_relaxed));
+        const float relCoef = (float) std::exp (-1.0 / (juce::jmax (1.0f, limReleaseMs.load (std::memory_order_relaxed)) * 0.001 * sampleRate));
+        const bool tp = limTruePeak.load (std::memory_order_relaxed);
+        auto* L = buffer.getWritePointer (0);
+        auto* R = channels > 1 ? buffer.getWritePointer (1) : nullptr;
+        float* M[2] = { midroll ? midBuf.getWritePointer (0) : nullptr, midroll && channels > 1 ? midBuf.getWritePointer (1) : nullptr };
+        float minGain = 1.0f;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // crete de l'echantillon entrant (et, en option, crete reelle entre les echantillons precedents)
+            float pk = 0.0f;
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                const float x = ch == 0 ? L[i] : R[i];
+                float p = std::abs (x);
+                if (tp)
+                {
+                    // interpolation cubique (Catmull-Rom) a 1/4, 1/2, 3/4 entre prev2 et prev : crete inter-echantillons
+                    const float y0 = laPrev3[ch], y1 = laPrev2[ch], y2 = laPrev[ch], y3 = x;
+                    for (float t : { 0.25f, 0.5f, 0.75f })
+                    {
+                        const float v = 0.5f * ((2 * y1) + (-y0 + y2) * t + (2 * y0 - 5 * y1 + 4 * y2 - y3) * t * t + (-y0 + 3 * y1 - 3 * y2 + y3) * t * t * t);
+                        p = juce::jmax (p, std::abs (v));
+                    }
+                }
+                laPrev3[ch] = laPrev2[ch]; laPrev2[ch] = laPrev[ch]; laPrev[ch] = x;
+                pk = juce::jmax (pk, p);
+            }
+            const float req = pk > ceilLin ? ceilLin / pk : 1.0f;
+
+            // minimum glissant sur n echantillons (n petit : balayage direct, borne et sans allocation)
+            laReq[(size_t) laPos] = req;
+            float mn = req;
+            for (int k = 1; k < laLen; ++k) mn = juce::jmin (mn, laReq[(size_t) ((laPos - k + kMaxLook) % kMaxLook)]);
+            // relachement : on remonte doucement, on redescend tout de suite
+            laRel = mn < laRel ? mn : mn + (laRel - mn) * relCoef;
+            // moyenne glissante de meme longueur : gain lisse, atteint le minimum quand la crete sort du retard
+            laSum += laRel - laMin[(size_t) ((laPos - laLen + kMaxLook) % kMaxLook)];
+            laMin[(size_t) laPos] = laRel;
+            const float g = (float) juce::jmin (1.0, laSum / laLen);
+
+            // signal (et Midroll) retardes de n echantillons, puis gain applique
+            const int out = (laPos - laLen + kMaxLook) % kMaxLook;
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                float* d = ch == 0 ? L : R;
+                const float delayed = laSig[(size_t) ch][(size_t) out];
+                laSig[(size_t) ch][(size_t) laPos] = d[i];
+                d[i] = juce::jlimit (-ceilLin, ceilLin, delayed * g);      // ecreteur de securite (ne sert qu'en dernier recours)
+                if (M[ch]) { const float md = laMid[(size_t) ch][(size_t) out]; laMid[(size_t) ch][(size_t) laPos] = M[ch][i]; M[ch][i] = md; }
+            }
+            minGain = juce::jmin (minGain, g);
+            laPos = (laPos + 1) % kMaxLook;
+        }
+        limGrDb.store (juce::Decibels::gainToDecibels (minGain), std::memory_order_relaxed);
     }
 
     // ---------- 9. MIDROLL remis tel quel, puis securite anti-saturation ----------
@@ -469,6 +542,9 @@ juce::String DspChain::paramsToJson() const
 
     j << ",\"lim\":{\"ceilingDb\":" << f (limCeilingDb.load())
                 << ",\"releaseMs\":"  << f (limReleaseMs.load())
+                << ",\"lookahead\":"  << b (limLookahead.load())
+                << ",\"lookaheadMs\":" << f (limLookaheadMs.load())
+                << ",\"truePeak\":"   << b (limTruePeak.load())
                 << ",\"gr\":"         << f (limGrDb.load())
         << "}";
 
@@ -566,6 +642,9 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
     {
         if (tokens[1] == "ceilingDb") { limCeilingDb.store (value); return true; }
         if (tokens[1] == "releaseMs") { limReleaseMs.store (value); return true; }
+        if (tokens[1] == "lookahead")   { limLookahead.store (value > 0.5f); return true; }
+        if (tokens[1] == "lookaheadMs") { limLookaheadMs.store (juce::jlimit (1.0f, 40.0f, value)); return true; }
+        if (tokens[1] == "truePeak")    { limTruePeak.store (value > 0.5f); return true; }
     }
 
     return false;

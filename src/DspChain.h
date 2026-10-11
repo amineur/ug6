@@ -87,9 +87,15 @@ public:
     std::array<CompBand, kNumBands> comp;
 
     // --- Master limiter (brick-wall, soft-knee, ratio ∞ above ceiling) ---
-    std::atomic<float> limCeilingDb { -0.5f };
+    std::atomic<float> limCeilingDb { -1.0f };
     std::atomic<float> limReleaseMs { 60.0f };
     std::atomic<float> limGrDb      { 0.0f };
+    // Limiteur a anticipation (Amine, 11/10/2026 : « plus que ca sature ») : le signal est retarde de quelques ms,
+    // le gain descend en douceur AVANT chaque crete ; crete reelle (entre echantillons) estimee par interpolation,
+    // puis ecreteur de securite au plafond.
+    std::atomic<bool>  limLookahead   { true };
+    std::atomic<float> limLookaheadMs { 5.0f };
+    std::atomic<bool>  limTruePeak    { true };
 
     // ============================================================
     //  Meters — audio thread writes, UI reads
@@ -181,6 +187,17 @@ private:
     juce::AudioBuffer<float> midBuf;
     float lastMidFreq = 0.0f;
     void updateMidroll();
+
+    // Limiteur a anticipation : tampons circulaires (signal + Midroll retardes ensemble), filtre de minimum glissant
+    // et moyenne glissante sur la meme longueur (gain toujours <= au gain requis quand la crete sort du retard).
+    static constexpr int kMaxLook = 2048;                 // ~42 ms a 48 kHz
+    std::array<std::array<float, kMaxLook>, 2> laSig {}, laMid {};
+    std::array<float, kMaxLook> laReq {};                 // gain requis par echantillon
+    std::array<float, kMaxLook> laMin {};                 // apres minimum glissant + relachement
+    int laPos = 0, laLen = 0;
+    double laSum = 0.0;                                   // somme glissante de laMin (moyenne)
+    float laRel = 1.0f, laPrev[2] = {0, 0}, laPrev2[2] = {0, 0}, laPrev3[2] = {0, 0};
+    void resetLookahead (int n);
 
     // EQ (4 bands × 2 channels)
     std::array<std::array<juce::dsp::IIR::Filter<float>, 2>, kNumEqBands> eqFilters;
