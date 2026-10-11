@@ -324,8 +324,21 @@ bool BroadcastSender::openConnection()
         return false;
     }
 
+    // Lire la reponse SANS bloquer jusqu'a 1023 octets : « HTTP/1.0 200 OK\r\n\r\n » ne fait que 19 octets. Une
+    // lecture bloquante attendait que le serveur ferme la connexion ; Infomaniak, ne recevant pas de son, coupait
+    // au bout de ~30 s et le premier paquet partait dans le vide (« write FAILED at call #2 »).
     char respBuf[1024] = {};
-    const int n = sock->read (respBuf, sizeof (respBuf) - 1, true);
+    int n = 0;
+    const auto deadline = juce::Time::getMillisecondCounter() + 5000;
+    while (n < (int) sizeof (respBuf) - 1 && juce::Time::getMillisecondCounter() < deadline)
+    {
+        if (sock->waitUntilReady (true, 200) <= 0) { if (n > 0 && std::strstr (respBuf, "\r\n")) break; continue; }
+        const int r = sock->read (respBuf + n, (int) sizeof (respBuf) - 1 - n, false);
+        if (r <= 0) break;
+        n += r;
+        respBuf[n] = 0;
+        if (std::strstr (respBuf, "\r\n\r\n") != nullptr) break;
+    }
 
     std::cout << "========== UG6 Broadcast RESPONSE IN ==========\n"
               << "Bytes : " << n << "\n"
