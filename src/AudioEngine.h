@@ -49,6 +49,13 @@ public:
         callback / DSP clock) but the final sample buffer is muted before being
         written. Lets 10 UG6 instances share a single output without producing a
         wall of noise — turn Monitor on for the one instance you want to preview. */
+    // Source de secours (comme l'entree de secours du Sound4) : si l'entree reste muette plus de fallbackSeconds,
+    // le fichier de secours (charge en boucle) prend le relais ; retour a l'entree des que le son revient (2 s).
+    std::atomic<bool>  fallbackOn      { false };
+    std::atomic<float> fallbackSeconds { 10.0f };
+    std::atomic<bool>  fallbackActive  { false };
+    juce::String       fallbackFile;              // chemin (fil HTTP seulement)
+
     void  setMonitorEnabled (bool v)     { monitorEnabled.store (v, std::memory_order_relaxed); }
     bool  isMonitorEnabled() const       { return monitorEnabled.load (std::memory_order_relaxed); }
 
@@ -97,6 +104,7 @@ private:
     juce::AudioDeviceManager deviceManager;
     DspChain dsp;
     FilePlayer filePlayer;
+    int64_t silentSamples = 0, soundSamples = 0;
     std::array<BroadcastSender, kNumEncoders> broadcasters;
 
     std::atomic<bool>   onAir          { false };

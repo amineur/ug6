@@ -61,6 +61,15 @@ public:
     std::atomic<float> agcMakeupDb   { 6.0f };     // brings level back up to ~-18 dB target
     std::atomic<float> agcGrDb       { 0.0f };     // meter readback
 
+    // --- AGC 2 bandes (d'apres le Sound4 PULSE de la FM, 12/10/2026) : graves nivelees a part du reste ---
+    std::atomic<bool>  agcTwoBand    { false };
+    std::atomic<float> agcSplitHz    { 200.0f };
+    std::atomic<float> agcLowGrDb    { 0.0f };     // meter readback (bande grave)
+
+    // --- Elargisseur stereo (Stereo FX du Sound4) : canal « cote » renforce au-dessus de 200 Hz, basses mono ---
+    std::atomic<bool>  stereoOn      { false };
+    std::atomic<float> stereoWidth   { 1.0f };     // 1 = inchange, 1.3 = +30 %
+
     // --- EQ 4 bandes (low-shelf, peak, peak, high-shelf) ---
     struct EqBand
     {
@@ -85,6 +94,22 @@ public:
         std::atomic<float> grDb        { 0.0f };   // meter readback
     };
     std::array<CompBand, kNumBands> comp;
+
+    // --- Limiteur par bande (3B Limiter du Sound4) : chaque bande plafonnee a part, une grosse basse ne fait plus
+    //     baisser les voix et les aigus ---
+    std::atomic<bool>  bandLimOn        { false };
+    std::atomic<float> bandLimCeilingDb { -4.0f };
+    std::atomic<float> bandLimReleaseMs { 40.0f };
+
+    // --- Ecreteur de basses (Final Limiter « BASS » du Sound4) : les bandes sous bassClipHz sont ecretees en douceur
+    //     avant le limiteur final, qui n'a plus a baisser tout le programme a chaque coup de basse ---
+    std::atomic<bool>  bassClipOn  { false };
+    std::atomic<float> bassClipDb  { -4.0f };
+    std::atomic<float> bassClipHz  { 150.0f };
+
+    // --- Mesure de volume (comme la barre « Loudness » du Sound4) : LUFS momentane (400 ms) et moyenne sur 1 min ---
+    std::atomic<float> loudMomentary { -70.0f };
+    std::atomic<float> loudMinute    { -70.0f };
 
     // --- Master limiter (brick-wall, soft-knee, ratio ∞ above ceiling) ---
     std::atomic<float> limCeilingDb { -1.0f };
@@ -187,6 +212,18 @@ private:
     juce::AudioBuffer<float> midBuf;
     float lastMidFreq = 0.0f;
     void updateMidroll();
+
+    // AGC 2 bandes, elargisseur, limiteurs par bande, mesure de volume
+    std::array<juce::dsp::LinkwitzRileyFilter<float>, 2> agcSplit;   // [0] passe-bas, [1] passe-haut
+    Compressor agcLow;
+    std::array<float, kNumBands> bandLimEnv {};
+    float bandLimRel = 0.0f;
+    std::array<juce::dsp::IIR::Filter<float>, 1> sideHp;
+    std::array<std::array<juce::dsp::IIR::Filter<float>, 2>, 2> kw;   // ponderation K [canal][etage]
+    double loudBlockSum = 0.0; int loudBlockN = 0, loudBlockLen = 4800;
+    std::array<double, 4> loudBlocks {}; int loudBlockIdx = 0;
+    double loudMinuteEnergy = 0.0; bool loudMinuteInit = false;
+    float lastAgcSplit = 0.0f;
 
     // Limiteur a anticipation : tampons circulaires (signal + Midroll retardes ensemble), filtre de minimum glissant
     // et moyenne glissante sur la meme longueur (gain toujours <= au gain requis quand la crete sort du retard).

@@ -73,6 +73,13 @@ InstanceState InstanceConfig::load (int numEncoders) const
         st.onAir   = static_cast<bool> (audio.getProperty ("onAir", false));
         st.monitor = static_cast<bool> (audio.getProperty ("monitor", false));
     }
+    const auto fb = parsed.getProperty ("fallback", juce::var());
+    if (fb.isObject())
+    {
+        st.fallbackFile    = fb.getProperty ("file", "").toString();
+        st.fallbackOn      = static_cast<bool> (fb.getProperty ("on", false));
+        st.fallbackSeconds = static_cast<double> (fb.getProperty ("seconds", 10.0));
+    }
     const auto dsp = parsed.getProperty ("dsp", juce::var());
     if (dsp.isObject()) st.dspJson = juce::JSON::toString (dsp, true);
     return st;
@@ -93,6 +100,10 @@ bool InstanceConfig::save (const InstanceState& st) const
     audio->setProperty ("output", st.output);   audio->setProperty ("source", st.source);
     audio->setProperty ("onAir", st.onAir);     audio->setProperty ("monitor", st.monitor);
     root->setProperty ("audio", juce::var (audio));
+
+    auto* fb = new juce::DynamicObject();
+    fb->setProperty ("file", st.fallbackFile); fb->setProperty ("on", st.fallbackOn); fb->setProperty ("seconds", st.fallbackSeconds);
+    root->setProperty ("fallback", juce::var (fb));
 
     if (st.dspJson.isNotEmpty())
     {

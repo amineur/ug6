@@ -415,6 +415,50 @@
           </div>
         </div>
 
+        <!-- ANTI-SATURATION, STEREO, VOLUME, SECOURS (12/10/2026, d'apres le Sound4 PULSE de la FM) -->
+        <div class="panel p-3 mb-3">
+          <div class="flex items-center justify-between mb-2">
+            <h3>Anti-saturation · stéréo · volume · secours</h3>
+            <span class="text-[11px] mono" :class="state.dsp.loud && state.dsp.loud.minute > -70 ? 'text-amber-300' : 'text-gray-500'"
+                  x-text="state.dsp.loud ? ('Volume ' + state.dsp.loud.momentary.toFixed(1) + ' LUFS · 1 min ' + state.dsp.loud.minute.toFixed(1)) : ''"></span>
+          </div>
+          <div class="grid grid-cols-5 gap-3 text-[10px]">
+            <div>
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" :checked="state.dsp.agc2.on" @change="setParam('agc2.on', $event.target.checked ? 1 : 0)" class="accent-amber-500" /> AGC 2 bandes</label>
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Séparation</span><span class="mono text-gray-300" x-text="state.dsp.agc2.splitHz.toFixed(0) + ' Hz'"></span></div>
+              <input type="range" min="80" max="400" step="10" :value="state.dsp.agc2.splitHz" @input="setParam('agc2.splitHz', $event.target.value)" class="w-full accent-amber-500" />
+              <div class="text-gray-600 mt-1">Graves nivelés à part du reste.</div>
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" :checked="state.dsp.stereo.on" @change="setParam('stereo.on', $event.target.checked ? 1 : 0)" class="accent-amber-500" /> Élargisseur stéréo</label>
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Largeur</span><span class="mono text-gray-300" x-text="Math.round(state.dsp.stereo.width * 100) + ' %'"></span></div>
+              <input type="range" min="0.5" max="1.6" step="0.05" :value="state.dsp.stereo.width" @input="setParam('stereo.width', $event.target.value)" class="w-full accent-amber-500" />
+              <div class="text-gray-600 mt-1">Basses gardées mono.</div>
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" :checked="state.dsp.bandLim.on" @change="setParam('bandLim.on', $event.target.checked ? 1 : 0)" class="accent-red-500" /> Limiteur par bande</label>
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Plafond bande</span><span class="mono text-gray-300" x-text="state.dsp.bandLim.ceilingDb.toFixed(1) + ' dB'"></span></div>
+              <input type="range" min="-12" max="0" step="0.5" :value="state.dsp.bandLim.ceilingDb" @input="setParam('bandLim.ceilingDb', $event.target.value)" class="w-full accent-red-500" />
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Relâchement</span><span class="mono text-gray-300" x-text="state.dsp.bandLim.releaseMs.toFixed(0) + ' ms'"></span></div>
+              <input type="range" min="10" max="300" step="5" :value="state.dsp.bandLim.releaseMs" @input="setParam('bandLim.releaseMs', $event.target.value)" class="w-full accent-red-500" />
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" :checked="state.dsp.bassClip.on" @change="setParam('bassClip.on', $event.target.checked ? 1 : 0)" class="accent-red-500" /> Écrêteur de basses</label>
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Plafond</span><span class="mono text-gray-300" x-text="state.dsp.bassClip.ceilingDb.toFixed(1) + ' dB'"></span></div>
+              <input type="range" min="-12" max="0" step="0.5" :value="state.dsp.bassClip.ceilingDb" @input="setParam('bassClip.ceilingDb', $event.target.value)" class="w-full accent-red-500" />
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Jusqu'à</span><span class="mono text-gray-300" x-text="state.dsp.bassClip.freqHz.toFixed(0) + ' Hz'"></span></div>
+              <input type="range" min="80" max="350" step="10" :value="state.dsp.bassClip.freqHz" @input="setParam('bassClip.freqHz', $event.target.value)" class="w-full accent-red-500" />
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" :checked="state.fallback.on" @change="setFallback({on: $event.target.checked})" class="accent-emerald-500" /> Secours sur silence</label>
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Après</span><span class="mono text-gray-300" x-text="state.fallback.seconds.toFixed(0) + ' s'"></span></div>
+              <input type="range" min="3" max="60" step="1" :value="state.fallback.seconds" @change="setFallback({seconds: +$event.target.value})" class="w-full accent-emerald-500" />
+              <input type="text" x-model="fbFile" @change="setFallback({file: fbFile})" placeholder="C:\secours\boucle.mp3" class="w-full mt-1 bg-black/40 border border-gray-700 rounded px-1 py-0.5 mono" />
+              <div class="mt-1" :class="state.fallback.active ? 'text-emerald-400 font-bold' : 'text-gray-600'" x-text="state.fallback.active ? 'SECOURS EN COURS' : 'Fichier lu en boucle si la Line est muette.'"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- LIMITER + MASTERS -->
         <div class="grid grid-cols-3 gap-3">
           <div class="panel p-3 col-span-2">
@@ -547,6 +591,11 @@ function emptyDsp() {
     xover: [100, 300, 800, 2500, 8000],
     comp: Array.from({length: 6}, () => ({ thresholdDb: -18, ratio: 2, attackMs: 20, releaseMs: 150, makeupDb: 0, gr: 0 })),
     lim: { ceilingDb: -1.0, releaseMs: 60, lookahead: true, lookaheadMs: 5, truePeak: true, gr: 0 },
+    agc2: { on: false, splitHz: 200, grLow: 0 },
+    stereo: { on: false, width: 1.0 },
+    bandLim: { on: false, ceilingDb: -4, releaseMs: 40 },
+    bassClip: { on: false, ceilingDb: -4, freqHz: 150 },
+    loud: { momentary: -70, minute: -70 },
     meters: { in: {peakL:0, peakR:0, rmsL:0, rmsR:0}, out: {peakL:0, peakR:0, rmsL:0, rmsR:0} }
   };
 }
@@ -563,8 +612,10 @@ function app() {
       broadcast: { available: false, status: 'déconnecté', reconnects: 0, bytesSent: 0, lastError: '',
                    config: { host: 'localhost', port: 8000, mount: '/stream', user: 'source', password: '', name: 'UG6', genre: '', bitrate: 128 } },
       encoders: [],
-      dsp: emptyDsp()
+      dsp: emptyDsp(),
+      fallback: { on: false, active: false, seconds: 10, file: '' }
     },
+    fbFile: '', fbSynced: false,
     encs: [0,1,2,3].map(() => ({ label: '', host: '', port: 80, mount: '', user: 'source', password: '', name: '', genre: '', bitrate: 128, codec: 'mp3' })),
     encsSynced: false,
     oddFolder: 'C:\\Program Files (x86)\\oddcastv3',
@@ -584,6 +635,9 @@ function app() {
       this.refreshDevices();
       this.refreshUserPresets();
       this.openMeterStream();
+      // volume (LUFS) et etat du secours : rafraichis sans toucher aux curseurs
+      setInterval(async () => { try { const s = await (await fetch('/api/state')).json();
+        if (s.dsp && s.dsp.loud) this.state.dsp.loud = s.dsp.loud; if (s.fallback) this.state.fallback.active = s.fallback.active; } catch (e) {} }, 2000);
     },
 
     async refreshState() {
@@ -605,6 +659,7 @@ function app() {
       // Deep merge so we don't lose UI bindings when fields are missing
       Object.assign(this.state, s);
       if (s.dsp) Object.assign(this.state.dsp, s.dsp);
+      if (s.fallback && !this.fbSynced) { this.fbFile = s.fallback.file || ''; this.fbSynced = true; }
       // Initial sync of the editable Icecast form from server config — only once,
       // so the user's typing isn't clobbered by SSE updates.
       if (!this.bcSynced && s.broadcast && s.broadcast.config) {
@@ -646,6 +701,11 @@ function app() {
     async setDriver(name)       { const r = await fetch('/api/device/driver', { method:'POST', body: name }); if (r.ok) this.applyState(await r.json()); else alert('Erreur driver : ' + await r.text()); this.refreshDevices(); },
 
     // --- generic DSP param setter ---
+    async setFallback(o) {
+      const r = await fetch('/api/fallback', { method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(o) });
+      if (!r.ok) { alert('Secours : ' + await r.text()); return; }
+      const st = await r.json(); this.state.fallback = st.fallback;
+    },
     async setParam(path, value) {
       const v = typeof value === 'number' ? value : parseFloat(value);
       // Optimistic UI update — overwritten by SSE soon after

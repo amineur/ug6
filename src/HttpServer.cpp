@@ -201,6 +201,13 @@ void HttpServer::restore()
                     : st.source == "file"  ? AudioEngine::Source::File : AudioEngine::Source::Generator);
     engine.setMonitorEnabled (st.monitor);
     if (st.dspJson.isNotEmpty()) PresetsStore::applyJson (st.dspJson, engine.getDsp());
+    if (st.fallbackFile.isNotEmpty())
+    {
+        engine.fallbackFile = st.fallbackFile;
+        if (engine.getFilePlayer().loadFile (juce::File (st.fallbackFile)).isEmpty()) engine.getFilePlayer().setLooping (true);
+    }
+    engine.fallbackSeconds.store ((float) st.fallbackSeconds);
+    engine.fallbackOn.store (st.fallbackOn);
     engine.setOnAir (st.onAir);
     for (int i = 0; i < AudioEngine::kNumEncoders; ++i)
         if (st.encoders[(size_t) i].enabled) engine.getBroadcastSender (i).connect();
@@ -221,6 +228,7 @@ void HttpServer::persist()
     st.onAir   = engine.isOnAir();
     st.monitor = engine.isMonitorEnabled();
     st.dspJson = engine.getDsp().paramsToJson();
+    st.fallbackFile = engine.fallbackFile; st.fallbackOn = engine.fallbackOn.load(); st.fallbackSeconds = engine.fallbackSeconds.load();
     instanceConfig.save (st);
 }
 
@@ -356,6 +364,10 @@ std::string HttpServer::buildStateJson() const
             << ",\"out\":\""<< jsonEscape (engine.getCurrentOutputDevice()) << "\""
             << ",\"sampleRate\":" << engine.getCurrentSampleRate() << "}"
       << ",\"dsp\":"  << engine.getDsp().paramsToJson()
+      << ",\"fallback\":{\"on\":" << (engine.fallbackOn.load() ? "true" : "false")
+            << ",\"active\":" << (engine.fallbackActive.load() ? "true" : "false")
+            << ",\"seconds\":" << engine.fallbackSeconds.load()
+            << ",\"file\":\"" << jsonEscape (engine.fallbackFile) << "\"}"
       << ",\"broadcast\":" << engine.getBroadcastSender (0).toJson();
     s << ",\"encoders\":[";
     for (int i = 0; i < AudioEngine::kNumEncoders; ++i) { if (i > 0) s << ","; s << engine.getBroadcastSender (i).toJson(); }
@@ -662,6 +674,25 @@ void HttpServer::setupRoutes()
     });
 
     // --- Importer les reglages d'Oddcast (dossier d'installation / de config) ---
+    // Source de secours : {"on":true,"seconds":10,"file":"C:\\...\\secours.mp3"} (fichier lu en boucle)
+    server->Post ("/api/fallback", [this] (const httplib::Request& req, httplib::Response& res)
+    {
+        const auto parsed = juce::JSON::parse (juce::String::fromUTF8 (req.body.c_str(), (int) req.body.size()));
+        if (! parsed.isObject()) { res.status = 400; res.set_content ("invalid JSON", "text/plain"); return; }
+        const auto file = parsed.getProperty ("file", juce::var()).toString().trim();
+        if (file.isNotEmpty() && file != engine.fallbackFile)
+        {
+            const auto err = engine.getFilePlayer().loadFile (juce::File (file));
+            if (err.isNotEmpty()) { res.status = 400; res.set_content (err.toStdString(), "text/plain; charset=utf-8"); return; }
+            engine.getFilePlayer().setLooping (true);
+            engine.fallbackFile = file;
+        }
+        if (parsed.hasProperty ("seconds")) engine.fallbackSeconds.store (juce::jlimit (3.0f, 120.0f, (float) (double) parsed.getProperty ("seconds", 10.0)));
+        if (parsed.hasProperty ("on")) engine.fallbackOn.store ((bool) parsed.getProperty ("on", false));
+        persist();
+        res.set_content (buildStateJson(), "application/json; charset=utf-8");
+    });
+
     server->Post ("/api/oddcast/import", [this] (const httplib::Request& req, httplib::Response& res)
     {
         res.set_content (importOddcast (juce::String::fromUTF8 (req.body.c_str(), static_cast<int> (req.body.size()))), "application/json; charset=utf-8");

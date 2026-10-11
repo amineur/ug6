@@ -172,6 +172,39 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputs,
             }
             std::memset (outputs[ch], 0, sizeof (float) * static_cast<size_t> (numSamples));
         }
+
+        // Secours sur silence : crete de l'entree comparee a -50 dBFS (silence) / -40 dBFS (son revenu)
+        if (fallbackOn.load (std::memory_order_relaxed) && filePlayer.hasFile())
+        {
+            float pk = 0.0f;
+            for (int ch = 0; ch < juce::jmin (2, numOutputChannels); ++ch)
+                if (outputs[ch] != nullptr)
+                    for (int i = 0; i < numSamples; ++i) pk = juce::jmax (pk, std::abs (outputs[ch][i]));
+            const bool active = fallbackActive.load (std::memory_order_relaxed);
+            if (pk < 0.00316f) { silentSamples += numSamples; soundSamples = 0; }
+            else if (pk > 0.01f) { soundSamples += numSamples; silentSamples = 0; }
+            if (! active && silentSamples > (int64_t) (fallbackSeconds.load (std::memory_order_relaxed) * sampleRate))
+            {
+                fallbackActive.store (true, std::memory_order_relaxed);
+                filePlayer.play();
+            }
+            else if (active && soundSamples > (int64_t) (2.0 * sampleRate))
+            {
+                fallbackActive.store (false, std::memory_order_relaxed);
+                filePlayer.pause();
+            }
+            if (fallbackActive.load (std::memory_order_relaxed))
+            {
+                juce::AudioBuffer<float> fileBuf (outputs, numOutputChannels, numSamples);
+                fileBuf.clear();
+                filePlayer.getNextAudioBlock (fileBuf);
+            }
+        }
+        else if (fallbackActive.load (std::memory_order_relaxed))
+        {
+            fallbackActive.store (false, std::memory_order_relaxed);
+            filePlayer.pause();
+        }
     }
     else // Source::File
     {

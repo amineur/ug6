@@ -70,6 +70,28 @@ void DspChain::prepare (double sr, int blockSize, int channels)
     limiter.prepare (sr);
     resetLookahead (juce::jlimit (16, kMaxLook - 1, (int) std::round (limLookaheadMs.load() * 0.001 * sr)));
 
+    for (auto& f : agcSplit) { f.prepare (spec); f.reset(); }
+    agcSplit[0].setType (juce::dsp::LinkwitzRileyFilterType::lowpass);
+    agcSplit[1].setType (juce::dsp::LinkwitzRileyFilterType::highpass);
+    lastAgcSplit = 0.0f;
+    agcLow.prepare (sr);
+    {
+        juce::dsp::ProcessSpec mono { sr, (juce::uint32) blockSize, 1 };
+        sideHp[0].prepare (mono);
+        *sideHp[0].coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (sr, 200.0f);
+        sideHp[0].reset();
+        for (auto& ch : kw)
+        {
+            ch[0].prepare (mono); ch[1].prepare (mono);
+            *ch[0].coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 1681.97, 0.7071, juce::Decibels::decibelsToGain (4.0f));
+            *ch[1].coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (sr, 38.13, 0.5003);
+            ch[0].reset(); ch[1].reset();
+        }
+    }
+    bandLimEnv.fill (0.0f);
+    loudBlockLen = juce::jmax (1, (int) (sr * 0.1)); loudBlockSum = 0.0; loudBlockN = 0; loudBlocks.fill (0.0); loudBlockIdx = 0;
+    loudMinuteInit = false;
+
     midBuf.setSize (numChannels, blockSize, false, true, true);
     midBuf.clear();
     lastMidFreq = 0.0f;
@@ -275,11 +297,11 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
         }
     }
 
-    // ---------- 3. AGC ----------
+    // ---------- 3. AGC (une bande, ou deux bandes : graves / reste) ----------
     if (agcOn.load (std::memory_order_relaxed))
     {
-        agc.updateCoefs (agcAttackMs.load (std::memory_order_relaxed),
-                         agcReleaseMs.load (std::memory_order_relaxed));
+        const float aMs = agcAttackMs.load (std::memory_order_relaxed), rMs = agcReleaseMs.load (std::memory_order_relaxed);
+        agc.updateCoefs (aMs, rMs);
         const float thr = agcThresholdDb.load (std::memory_order_relaxed);
         const float rat = agcRatio.load       (std::memory_order_relaxed);
         const float mu  = agcMakeupDb.load    (std::memory_order_relaxed);
@@ -287,12 +309,38 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
 
         auto* L = buffer.getWritePointer (0);
         auto* R = channels > 1 ? buffer.getWritePointer (1) : nullptr;
-        for (int i = 0; i < numSamples; ++i)
+        if (! agcTwoBand.load (std::memory_order_relaxed))
         {
-            const float detect = R ? juce::jmax (std::abs (L[i]), std::abs (R[i])) : std::abs (L[i]);
-            const float g = agc.computeGain (detect, thr, rat, mu, ceiling);
-            L[i] *= g;
-            if (R) R[i] *= g;
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float detect = R ? juce::jmax (std::abs (L[i]), std::abs (R[i])) : std::abs (L[i]);
+                const float g = agc.computeGain (detect, thr, rat, mu, ceiling);
+                L[i] *= g;
+                if (R) R[i] *= g;
+            }
+        }
+        else
+        {
+            const float fs = agcSplitHz.load (std::memory_order_relaxed);
+            if (fs != lastAgcSplit) { lastAgcSplit = fs; for (auto& f : agcSplit) f.setCutoffFrequency (juce::jlimit (60.0f, 600.0f, fs)); }
+            agcLow.updateCoefs (aMs, rMs);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                float lo[2], hi[2];
+                for (int ch = 0; ch < channels; ++ch)
+                {
+                    const float x = ch == 0 ? L[i] : R[i];
+                    lo[ch] = agcSplit[0].processSample (ch, x);
+                    hi[ch] = agcSplit[1].processSample (ch, x);
+                }
+                const float dLo = channels > 1 ? juce::jmax (std::abs (lo[0]), std::abs (lo[1])) : std::abs (lo[0]);
+                const float dHi = channels > 1 ? juce::jmax (std::abs (hi[0]), std::abs (hi[1])) : std::abs (hi[0]);
+                const float gLo = agcLow.computeGain (dLo, thr, rat, mu, ceiling);
+                const float gHi = agc.computeGain (dHi, thr, rat, mu, ceiling);
+                L[i] = lo[0] * gLo + hi[0] * gHi;
+                if (R) R[i] = lo[1] * gLo + hi[1] * gHi;
+            }
+            agcLowGrDb.store (agcLow.currentGrDb(), std::memory_order_relaxed);
         }
         agcGrDb.store (agc.currentGrDb(), std::memory_order_relaxed);
     }
@@ -306,6 +354,19 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
             auto* d = buffer.getWritePointer (ch);
             for (int i = 0; i < numSamples; ++i)
                 d[i] = eqFilters[b][ch].processSample (d[i]);
+        }
+    }
+
+    // ---------- 4b. Elargisseur stereo (cote renforce au-dessus de 200 Hz, basses laissees mono) ----------
+    if (channels > 1 && stereoOn.load (std::memory_order_relaxed))
+    {
+        const float w = juce::jlimit (-1.0f, 1.0f, stereoWidth.load (std::memory_order_relaxed) - 1.0f);
+        auto* L = buffer.getWritePointer (0); auto* R = buffer.getWritePointer (1);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float side = 0.5f * (L[i] - R[i]);
+            const float add = w * sideHp[0].processSample (side);
+            L[i] += add; R[i] -= add;
         }
     }
 
@@ -359,6 +420,31 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
             if (R) R[i] *= g;
         }
         cb.grDb.store (bandComps[b].currentGrDb(), std::memory_order_relaxed);
+
+        // Limiteur de la bande (attaque immediate, relachement court)
+        if (bandLimOn.load (std::memory_order_relaxed))
+        {
+            const float c = juce::Decibels::decibelsToGain (bandLimCeilingDb.load (std::memory_order_relaxed));
+            const float rel = std::exp (-1.0f / juce::jmax (1.0f, bandLimReleaseMs.load (std::memory_order_relaxed) * 0.001f * (float) sampleRate));
+            float env = bandLimEnv[(size_t) b];       // gain courant (1 = rien)
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float pk = R ? juce::jmax (std::abs (L[i]), std::abs (R[i])) : std::abs (L[i]);
+                const float req = pk > c ? c / pk : 1.0f;
+                env = env <= 0.0f ? req : (req < env ? req : req + (env - req) * rel);
+                L[i] *= env; if (R) R[i] *= env;
+            }
+            bandLimEnv[(size_t) b] = env;
+        }
+
+        // Ecreteur de basses : bandes entierement sous bassClipHz, ecretage doux
+        if (bassClipOn.load (std::memory_order_relaxed)
+            && (b < kNumXovers ? xoverFreq[(size_t) b].load (std::memory_order_relaxed) <= bassClipHz.load (std::memory_order_relaxed) : false))
+        {
+            const float c = juce::Decibels::decibelsToGain (bassClipDb.load (std::memory_order_relaxed)), k = 0.5f * c;
+            auto clip = [c, k] (float x) { const float a = std::abs (x); if (a <= k) return x; return std::copysign (k + (c - k) * std::tanh ((a - k) / (c - k)), x); };
+            for (int i = 0; i < numSamples; ++i) { L[i] = clip (L[i]); if (R) R[i] = clip (R[i]); }
+        }
     }
 
     // Sum bands back into the main buffer.
@@ -453,6 +539,32 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
         limGrDb.store (juce::Decibels::gainToDecibels (minGain), std::memory_order_relaxed);
     }
 
+    // ---------- 8b. Mesure de volume (ITU-R BS.1770 : ponderation K, blocs de 100 ms) ----------
+    {
+        const auto* L = buffer.getReadPointer (0);
+        const auto* R = channels > 1 ? buffer.getReadPointer (1) : nullptr;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float l = kw[0][1].processSample (kw[0][0].processSample (L[i]));
+            const float r = R ? kw[1][1].processSample (kw[1][0].processSample (R[i])) : l;
+            loudBlockSum += (double) l * l + (double) r * r;
+            if (++loudBlockN >= loudBlockLen)
+            {
+                loudBlocks[(size_t) loudBlockIdx] = loudBlockSum / loudBlockN; loudBlockIdx = (loudBlockIdx + 1) % 4;
+                loudBlockSum = 0.0; loudBlockN = 0;
+                const double ms = (loudBlocks[0] + loudBlocks[1] + loudBlocks[2] + loudBlocks[3]) / 4.0;
+                const float lufs = (float) (-0.691 + 10.0 * std::log10 (ms + 1.0e-12));
+                loudMomentary.store (juce::jmax (-70.0f, lufs), std::memory_order_relaxed);
+                if (lufs > -70.0f)                    // silence exclu de la moyenne
+                {
+                    if (! loudMinuteInit) { loudMinuteEnergy = ms; loudMinuteInit = true; }
+                    else loudMinuteEnergy += (ms - loudMinuteEnergy) / 600.0;     // ~1 min (600 blocs de 100 ms)
+                    loudMinute.store ((float) (-0.691 + 10.0 * std::log10 (loudMinuteEnergy + 1.0e-12)), std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+
     // ---------- 9. MIDROLL remis tel quel, puis securite anti-saturation ----------
     if (midroll)
     {
@@ -499,6 +611,11 @@ juce::String DspChain::paramsToJson() const
       << "\"bypass\":"        << b (bypass.load())
       << ",\"inputGainDb\":"  << f (inputGainDb.load())
       << ",\"outputGainDb\":" << f (outputGainDb.load())
+      << ",\"agc2\":{\"on\":" << b (agcTwoBand.load()) << ",\"splitHz\":" << f (agcSplitHz.load()) << ",\"grLow\":" << f (agcLowGrDb.load()) << "}"
+      << ",\"stereo\":{\"on\":" << b (stereoOn.load()) << ",\"width\":" << f (stereoWidth.load()) << "}"
+      << ",\"bandLim\":{\"on\":" << b (bandLimOn.load()) << ",\"ceilingDb\":" << f (bandLimCeilingDb.load()) << ",\"releaseMs\":" << f (bandLimReleaseMs.load()) << "}"
+      << ",\"bassClip\":{\"on\":" << b (bassClipOn.load()) << ",\"ceilingDb\":" << f (bassClipDb.load()) << ",\"freqHz\":" << f (bassClipHz.load()) << "}"
+      << ",\"loud\":{\"momentary\":" << f (loudMomentary.load()) << ",\"minute\":" << f (loudMinute.load()) << "}"
       << ",\"midroll\":{\"on\":" << b (midrollOn.load()) << ",\"freqHz\":" << f (midrollFreqHz.load()) << "}"
       << ",\"hpf\":{\"on\":"  << b (hpfOn.load())     << ",\"freqHz\":" << f (hpfFreqHz.load()) << "}"
       << ",\"agc\":{\"on\":"  << b (agcOn.load())
@@ -586,6 +703,29 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
     if (root == "bypass")        { bypass.store (value > 0.5f); return true; }
     if (root == "inputGainDb")   { inputGainDb.store (value);   return true; }
     if (root == "outputGainDb")  { outputGainDb.store (value);  return true; }
+
+    if (root == "agc2" && tokens.size() == 2)
+    {
+        if (tokens[1] == "on")      { agcTwoBand.store (value > 0.5f); return true; }
+        if (tokens[1] == "splitHz") { agcSplitHz.store (juce::jlimit (60.0f, 600.0f, value)); return true; }
+    }
+    if (root == "stereo" && tokens.size() == 2)
+    {
+        if (tokens[1] == "on")    { stereoOn.store (value > 0.5f); return true; }
+        if (tokens[1] == "width") { stereoWidth.store (juce::jlimit (0.5f, 2.0f, value)); return true; }
+    }
+    if (root == "bandLim" && tokens.size() == 2)
+    {
+        if (tokens[1] == "on")        { bandLimOn.store (value > 0.5f); return true; }
+        if (tokens[1] == "ceilingDb") { bandLimCeilingDb.store (juce::jlimit (-24.0f, 0.0f, value)); return true; }
+        if (tokens[1] == "releaseMs") { bandLimReleaseMs.store (juce::jlimit (5.0f, 500.0f, value)); return true; }
+    }
+    if (root == "bassClip" && tokens.size() == 2)
+    {
+        if (tokens[1] == "on")        { bassClipOn.store (value > 0.5f); return true; }
+        if (tokens[1] == "ceilingDb") { bassClipDb.store (juce::jlimit (-24.0f, 0.0f, value)); return true; }
+        if (tokens[1] == "freqHz")    { bassClipHz.store (juce::jlimit (50.0f, 400.0f, value)); return true; }
+    }
 
     if (root == "midroll" && tokens.size() == 2)
     {

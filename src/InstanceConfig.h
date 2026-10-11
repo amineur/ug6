@@ -23,6 +23,9 @@ struct InstanceState
     bool onAir   { false };
     bool monitor { false };
     juce::String dspJson;                     // DspChain::paramsToJson()
+    juce::String fallbackFile;                // source de secours (fichier en boucle)
+    bool fallbackOn { false };
+    double fallbackSeconds { 10.0 };
     bool loaded  { false };                   // un fichier existait
 };
 
