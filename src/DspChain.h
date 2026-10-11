@@ -41,6 +41,13 @@ public:
     std::atomic<float> inputGainDb   { 0.0f };
     std::atomic<float> outputGainDb  { 0.0f };
 
+    // --- Protection du Midroll (Amine, 11/10/2026) ---
+    // Le Midroll des webradios est une sinusoide de 18 Hz a ~-1 dBFS que la regie detecte pour lancer la pub
+    // streaming. Le coupe-bas l'ecrasait (-12 dB mesure sur Kompa). La bande autour de 18 Hz est donc separee AVANT
+    // le traitement et remise telle quelle APRES le limiteur : la musique est traitee comme avant, le Midroll intact.
+    std::atomic<bool>  midrollOn     { true };
+    std::atomic<float> midrollFreqHz { 18.0f };
+
     // --- HPF (rumble filter) ---
     std::atomic<bool>  hpfOn         { true };
     std::atomic<float> hpfFreqHz     { 30.0f };
@@ -161,6 +168,19 @@ private:
 
     // HPF (one per channel)
     std::array<juce::dsp::IIR::Filter<float>, 2> hpf;
+
+    // Passe-bande du Midroll, en double precision (18 Hz a 44,1 kHz : trop serre pour des biquads en float).
+    // Deux cellules RBJ en cascade par canal (4e ordre) : tres etroit, la basse musicale (> 30 Hz) n'y passe pas.
+    struct Biquad
+    {
+        double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
+        inline double process (double x) { const double y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return y; }
+        void reset() { z1 = z2 = 0; }
+    };
+    std::array<std::array<Biquad, 2>, 2> midBp;           // [canal][cellule]
+    juce::AudioBuffer<float> midBuf;
+    float lastMidFreq = 0.0f;
+    void updateMidroll();
 
     // EQ (4 bands × 2 channels)
     std::array<std::array<juce::dsp::IIR::Filter<float>, 2>, kNumEqBands> eqFilters;

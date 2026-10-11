@@ -69,6 +69,11 @@ void DspChain::prepare (double sr, int blockSize, int channels)
     for (auto& c : bandComps) c.prepare (sr);
     limiter.prepare (sr);
 
+    midBuf.setSize (numChannels, blockSize, false, true, true);
+    midBuf.clear();
+    lastMidFreq = 0.0f;
+    for (auto& ch : midBp) for (auto& q : ch) q.reset();
+
     for (auto& b : bandScratch)
     {
         b.setSize (numChannels, blockSize, false, true, true);
@@ -95,7 +100,25 @@ void DspChain::reset()
     for (auto& bandCh : bandFilters)
         for (auto& bf : bandCh) { bf.hp.reset(); bf.lp.reset(); }
 
+    for (auto& ch : midBp) for (auto& q : ch) q.reset();
     rmsInLSmooth = rmsInRSmooth = rmsOutLSmooth = rmsOutRSmooth = 0.0f;
+}
+
+// Passe-bande RBJ (gain 0 dB au centre), Q = 2, deux cellules : -3 dB vers 14 et 23 Hz, < -20 dB a 36 Hz.
+void DspChain::updateMidroll()
+{
+    const float f = midrollFreqHz.load (std::memory_order_relaxed);
+    if (f == lastMidFreq) return;
+    lastMidFreq = f;
+    const double w0 = 2.0 * juce::MathConstants<double>::pi * f / sampleRate, q = 2.0;
+    const double alpha = std::sin (w0) / (2.0 * q), a0 = 1.0 + alpha;
+    for (auto& ch : midBp)
+        for (auto& c : ch)
+        {
+            c.b0 = alpha / a0; c.b1 = 0.0; c.b2 = -alpha / a0;
+            c.a1 = -2.0 * std::cos (w0) / a0; c.a2 = (1.0 - alpha) / a0;
+            c.reset();
+        }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +229,26 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
 
     // ---------- coefficient refresh (cheap, only updates if atomic changed) ----------
     updateAllCoefficients();
+
+    // ---------- 0. MIDROLL : la bande des 18 Hz est mise de cote, intacte ----------
+    const bool midroll = midrollOn.load (std::memory_order_relaxed);
+    if (midroll)
+    {
+        updateMidroll();
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            auto* d = buffer.getWritePointer (ch);
+            auto* m = midBuf.getWritePointer (ch);
+            auto& c = midBp[(size_t) ch];
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double x = d[i];
+                const double band = c[1].process (c[0].process (x));
+                m[i] = (float) band;
+                d[i] = (float) (x - band);          // le traitement ne voit plus le Midroll
+            }
+        }
+    }
 
     // ---------- 1. INPUT GAIN ----------
     const float inGainLin = juce::Decibels::decibelsToGain (inputGainDb.load (std::memory_order_relaxed));
@@ -337,6 +380,18 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
         limGrDb.store (limiter.currentGrDb(), std::memory_order_relaxed);
     }
 
+    // ---------- 9. MIDROLL remis tel quel, puis securite anti-saturation ----------
+    if (midroll)
+    {
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            auto* d = buffer.getWritePointer (ch);
+            const auto* m = midBuf.getReadPointer (ch);
+            for (int i = 0; i < numSamples; ++i)
+                d[i] = juce::jlimit (-0.999f, 0.999f, d[i] + m[i]);
+        }
+    }
+
     // ---------- OUTPUT METERS ----------
     {
         float pkL = 0, pkR = 0;
@@ -371,6 +426,7 @@ juce::String DspChain::paramsToJson() const
       << "\"bypass\":"        << b (bypass.load())
       << ",\"inputGainDb\":"  << f (inputGainDb.load())
       << ",\"outputGainDb\":" << f (outputGainDb.load())
+      << ",\"midroll\":{\"on\":" << b (midrollOn.load()) << ",\"freqHz\":" << f (midrollFreqHz.load()) << "}"
       << ",\"hpf\":{\"on\":"  << b (hpfOn.load())     << ",\"freqHz\":" << f (hpfFreqHz.load()) << "}"
       << ",\"agc\":{\"on\":"  << b (agcOn.load())
             << ",\"thresholdDb\":" << f (agcThresholdDb.load())
@@ -454,6 +510,12 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
     if (root == "bypass")        { bypass.store (value > 0.5f); return true; }
     if (root == "inputGainDb")   { inputGainDb.store (value);   return true; }
     if (root == "outputGainDb")  { outputGainDb.store (value);  return true; }
+
+    if (root == "midroll" && tokens.size() == 2)
+    {
+        if (tokens[1] == "on")     { midrollOn.store (value > 0.5f); return true; }
+        if (tokens[1] == "freqHz") { midrollFreqHz.store (juce::jlimit (5.0f, 60.0f, value)); return true; }
+    }
 
     if (root == "hpf" && tokens.size() == 2)
     {
