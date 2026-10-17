@@ -6,6 +6,7 @@
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_events/juce_events.h>
 
 #include <array>
 #include <atomic>
@@ -19,7 +20,8 @@
  *  - All audio is routed through DspChain (HPF + AGC + EQ + multibande + limiter).
  *  - ON AIR == false → output is silent (DSP still runs, but final mute applied).
  */
-class AudioEngine : public juce::AudioIODeviceCallback
+class AudioEngine : public juce::AudioIODeviceCallback,
+                    private juce::Timer
 {
 public:
     enum class Source { Generator, AudioInput, File };
@@ -54,7 +56,14 @@ public:
     std::atomic<bool>  fallbackOn      { false };
     std::atomic<float> fallbackSeconds { 10.0f };
     std::atomic<bool>  fallbackActive  { false };
-    juce::String       fallbackFile;              // chemin (fil HTTP seulement)
+    std::atomic<bool>  fallbackFileMissing { false };   // fichier introuvable au demarrage : le Timer reessaie toutes les 30 s
+
+    juce::String getFallbackFile() const;         // copie, sous verrou (fils HTTP + Timer)
+    void         setFallbackFile (const juce::String& path);
+
+    // Surveillance 24/7 (Timer sur le fil des messages) : rappel audio muet > 3 s = peripherique bloque.
+    bool         isAudioStalled() const  { return audioStalled.load (std::memory_order_relaxed); }
+    juce::String getLastDeviceError() const;
 
     void  setMonitorEnabled (bool v)     { monitorEnabled.store (v, std::memory_order_relaxed); }
     bool  isMonitorEnabled() const       { return monitorEnabled.load (std::memory_order_relaxed); }
@@ -99,9 +108,30 @@ public:
                                            const juce::AudioIODeviceCallbackContext& ctx) override;
     void audioDeviceAboutToStart (juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
+    void audioDeviceError (const juce::String& errorMessage) override;
 
 private:
+    void timerCallback() override;
+    juce::String applyDeviceSetup (juce::AudioDeviceManager::AudioDeviceSetup setup, const juce::String& what);
+    void setDeviceError (const juce::String& what, const juce::String& err);
+
     juce::AudioDeviceManager deviceManager;
+    juce::CriticalSection deviceLock;             // setInputDevice / setOutputDevice / setDriverType / reprise
+    juce::String wantedInput;                     // entree demandee (demarrage ou API), retentee toutes les 10 s
+    juce::String lastDeviceError;
+    mutable juce::CriticalSection deviceErrorLock;
+
+    juce::String fallbackFile;                    // chemin du fichier de secours
+    mutable juce::CriticalSection fallbackFileLock;
+    bool fallbackPlaying = false;                 // ce que le Timer a demande au lecteur (play/pause hors du rappel audio)
+
+    std::atomic<juce::uint32> lastCallbackMs { 0 };
+    std::atomic<bool>         audioStalled   { false };
+    int          restartBackoffMs = 1000;
+    juce::uint32 nextRestartMs    = 0;
+    juce::uint32 lastInputRetryMs = 0;
+    juce::uint32 lastFallbackRetryMs = 0;
+
     DspChain dsp;
     FilePlayer filePlayer;
     int64_t silentSamples = 0, soundSamples = 0;

@@ -129,6 +129,7 @@ public:
     std::atomic<float> rmsInL   { 0.0f }, rmsInR   { 0.0f };
     std::atomic<float> peakOutL { 0.0f }, peakOutR { 0.0f };
     std::atomic<float> rmsOutL  { 0.0f }, rmsOutR  { 0.0f };
+    std::atomic<int>   nanResets { 0 };     // sorties non finies (NaN/inf) purgees : filtres remis a zero
 
     // ============================================================
     //  Lifecycle (call from prepareToPlay / audio thread)

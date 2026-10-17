@@ -13,11 +13,65 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <vector>
+
+// Options du socket (keepalive, tampon d'envoi) : le PC de diffusion doit detecter seul une liaison morte.
+#ifdef _WIN32
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN 1
+ #endif
+ #include <winsock2.h>
+ #include <ws2tcpip.h>
+ #include <mstcpip.h>
+#else
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+ #include <netinet/tcp.h>
+#endif
+
+namespace
+{
+    // Keepalive TCP (10 s d'inactivite, sonde toutes les 3 s) + tampon d'envoi ~64 Ko.
+    void applySocketOptions (int handle)
+    {
+        if (handle < 0) return;
+       #ifdef _WIN32
+        const SOCKET sock = static_cast<SOCKET> (handle);
+        BOOL on = TRUE;
+        setsockopt (sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*> (&on), sizeof (on));
+        tcp_keepalive ka {};
+        ka.onoff = 1; ka.keepalivetime = 10000; ka.keepaliveinterval = 3000;
+        DWORD ret = 0;
+        WSAIoctl (sock, SIO_KEEPALIVE_VALS, &ka, sizeof (ka), nullptr, 0, &ret, nullptr, nullptr);
+        int sndBuf = 64 * 1024;
+        setsockopt (sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*> (&sndBuf), sizeof (sndBuf));
+       #else
+        int on = 1;
+        setsockopt (handle, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof (on));
+        int idle = 10, intvl = 3, cnt = 3;
+       #ifdef TCP_KEEPIDLE
+        setsockopt (handle, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof (idle));
+       #elif defined (TCP_KEEPALIVE)
+        setsockopt (handle, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof (idle));   // macOS
+       #endif
+       #ifdef TCP_KEEPINTVL
+        setsockopt (handle, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof (intvl));
+       #endif
+       #ifdef TCP_KEEPCNT
+        setsockopt (handle, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof (cnt));
+       #endif
+        int sndBuf = 64 * 1024;
+        setsockopt (handle, SOL_SOCKET, SO_SNDBUF, &sndBuf, sizeof (sndBuf));
+        juce::ignoreUnused (idle, intvl, cnt);
+       #endif
+    }
+}
 
 // ---------------------------------------------------------------------------
 //  Lifecycle
@@ -49,10 +103,22 @@ BroadcastSender::~BroadcastSender()
     wantsToBeConnected.store (false);
     if (senderThread.joinable())
         senderThread.join();
+    // Le fil detache du titrage tient « this » : on attend qu'il ait fini (au plus ~7 s).
+    for (int i = 0; i < 800 && metadataInFlight.load(); ++i)
+        std::this_thread::sleep_for (std::chrono::milliseconds (10));
    #endif
 }
 
-void BroadcastSender::prepare (double sr) { sampleRate = sr; }
+// Si la frequence change alors qu'un encodeur tourne (le peripherique a ete rouvert a une autre cadence), on force
+// une reconnexion propre : l'encodeur sera recree a la bonne frequence.
+void BroadcastSender::prepare (double sr)
+{
+    if (std::abs (sr - sampleRate) < 0.5) return;
+    sampleRate = sr;
+    const auto st = status.load();
+    if (st != Status::Disabled && st != Status::Disconnected)
+        configEpoch.fetch_add (1);
+}
 
 // ---------------------------------------------------------------------------
 //  Audio-thread producer
@@ -143,6 +209,13 @@ void BroadcastSender::setError (const juce::String& msg)
 
 bool BroadcastSender::openConnection()
 {
+    // Handshake detaille seulement la premiere fois et quand l'erreur precedente change (sinon, 12 instances qui
+    // reessaient toutes les 30 s rempliraient le journal).
+    const auto prevError = getLastError();
+    const bool verbose   = ! handshakeLogged || prevError != lastLoggedError;
+    handshakeLogged = true;
+    lastLoggedError = prevError;
+
     setError ({});
     Config cfg = getConfig();
 
@@ -253,6 +326,7 @@ bool BroadcastSender::openConnection()
        #endif
         return false;
     }
+    applySocketOptions (sock->getRawSocketHandle());
 
     // ----- 3. Send Icecast SOURCE headers -----
     // Icecast 2.x accepts the classic SOURCE method over HTTP/1.0.
@@ -287,6 +361,7 @@ bool BroadcastSender::openConnection()
     const auto headersLen  = static_cast<int> (headers.getNumBytesAsUTF8());
 
     // ---- DEBUG : print exactly what we're sending to the console ----
+    if (verbose)
     std::cout << "\n========== UG6 Broadcast HANDSHAKE OUT ==========\n"
               << "Endpoint : " << cfg.host << ":" << cfg.port << cfg.mount << "\n"
               << "User     : " << user << "\n"
@@ -340,6 +415,7 @@ bool BroadcastSender::openConnection()
         if (std::strstr (respBuf, "\r\n\r\n") != nullptr) break;
     }
 
+    if (verbose)
     std::cout << "========== UG6 Broadcast RESPONSE IN ==========\n"
               << "Bytes : " << n << "\n"
               << "----- raw response -----\n"
@@ -464,7 +540,7 @@ void BroadcastSender::senderThreadLoop()
             status.store (Status::Disconnected);
         }
 
-        if (status.load() == Status::Connected && songDirty.load())
+        if (status.load() == Status::Connected && songDirty.load() && ! metadataInFlight.load())
             sendMetadata();
 
         // Drain → encode → write
@@ -565,21 +641,31 @@ void BroadcastSender::senderThreadLoop()
                 closeConnection();
                 status.store (Status::Error);
                 reconnects.fetch_add (1);
+                std::this_thread::sleep_for (std::chrono::milliseconds (backoffMs));
+                backoffMs = juce::jmin (backoffMs * 2, 30000);
                 continue;
             }
 
             if (encodedBytes > 0)
             {
-                const int written = socket->write (outBuf.data(), encodedBytes);
+                // Une liaison morte peut bloquer write() indefiniment : on attend au plus 5 s que le socket soit
+                // pret, sinon on coupe et on repart en reconnexion.
+                int written = -1;
+                if (socket->waitUntilReady (false /*write*/, 5000) > 0)
+                    written = socket->write (outBuf.data(), encodedBytes);
                 static int writeCallCount = 0;
                 ++writeCallCount;
 
-                // Log the first 5 writes verbosely, then every 50th to avoid spam.
-                if (writeCallCount <= 5 || (writeCallCount % 50) == 0)
+                // Log the first 5 writes verbosely, then at most every 5 min to avoid spam.
+                const auto nowMs = juce::Time::getMillisecondCounter();
+                if (writeCallCount <= 5 || nowMs - lastWriteLogMs >= 5 * 60 * 1000)
+                {
+                    lastWriteLogMs = nowMs;
                     std::cout << "[Broadcast] write #" << writeCallCount
                               << " asked=" << encodedBytes
                               << " wrote=" << written
                               << " total=" << (bytesSent.load() + (written > 0 ? written : 0)) << " B\n" << std::flush;
+                }
 
                 if (written != encodedBytes)
                 {
@@ -612,7 +698,7 @@ void BroadcastSender::senderThreadLoop()
         }
         else
         {
-            std::this_thread::sleep_for (std::chrono::milliseconds (5));
+            std::this_thread::sleep_for (std::chrono::milliseconds (status.load() == Status::Connected ? 5 : 100));
         }
     }
 
@@ -621,32 +707,47 @@ void BroadcastSender::senderThreadLoop()
 
 // Titrage : comme Oddcast, une requete a part vers Icecast (GET /admin/metadata?mode=updinfo), avec les memes
 // identifiants que la source. Un echec n'interrompt jamais le flux.
+// La requete part sur un fil detache (un seul a la fois, garde par metadataInFlight) : la connexion et l'attente
+// de la reponse (jusqu'a 6 s) ne retiennent plus le fil d'envoi audio. Si un envoi est deja en vol, le titre
+// reste en attente et repart au tour suivant.
 void BroadcastSender::sendMetadata()
 {
+    if (metadataInFlight.exchange (true)) return;
     juce::String song;
     {
         const juce::ScopedLock sl (songLock);
         song = pendingSong; songDirty.store (false);
     }
     const Config cfg = getConfig();
-    juce::StreamingSocket s;
-    if (! s.connect (cfg.host, cfg.port, 3000)) { std::cout << "[Metadata] connexion impossible\n" << std::flush; return; }
-    const auto creds = juce::Base64::toBase64 (cfg.user.trim() + ":" + cfg.password.trim());
-    juce::String req;
-    req << "GET /admin/metadata?mount=" << juce::URL::addEscapeChars (cfg.mount.trim(), true)
-        << "&mode=updinfo&charset=UTF-8&song=" << juce::URL::addEscapeChars (song, true) << " HTTP/1.0\r\n"
-        << "Host: " << cfg.host << "\r\n"
-        << "Authorization: Basic " << creds << "\r\n"
-        << "User-Agent: libshout/2.4.6\r\n\r\n";
-    s.write (req.toRawUTF8(), static_cast<int> (req.getNumBytesAsUTF8()));
-    char buf[256] = {};
-    if (s.waitUntilReady (true, 3000) > 0) s.read (buf, sizeof (buf) - 1, false);
-    s.close();
-    const juce::String first = juce::String (buf).upToFirstOccurrenceOf ("\r\n", false, false);
-    std::cout << "[Metadata] " << song << " -> " << first << "\n" << std::flush;
-    const juce::ScopedLock sl (songLock);
-    currentSong = song;
-    if (pendingSong == song) pendingSong = {};
+    std::thread ([this, cfg, song]
+    {
+        juce::StreamingSocket s;
+        if (! s.connect (cfg.host, cfg.port, 3000))
+        {
+            std::cout << "[Metadata] connexion impossible\n" << std::flush;
+            metadataInFlight.store (false);
+            return;
+        }
+        const auto creds = juce::Base64::toBase64 (cfg.user.trim() + ":" + cfg.password.trim());
+        juce::String req;
+        req << "GET /admin/metadata?mount=" << juce::URL::addEscapeChars (cfg.mount.trim(), true)
+            << "&mode=updinfo&charset=UTF-8&song=" << juce::URL::addEscapeChars (song, true) << " HTTP/1.0\r\n"
+            << "Host: " << cfg.host << "\r\n"
+            << "Authorization: Basic " << creds << "\r\n"
+            << "User-Agent: libshout/2.4.6\r\n\r\n";
+        s.write (req.toRawUTF8(), static_cast<int> (req.getNumBytesAsUTF8()));
+        char buf[256] = {};
+        if (s.waitUntilReady (true, 3000) > 0) s.read (buf, sizeof (buf) - 1, false);
+        s.close();
+        const juce::String first = juce::String (buf).upToFirstOccurrenceOf ("\r\n", false, false);
+        std::cout << "[Metadata] " << song << " -> " << first << "\n" << std::flush;
+        {
+            const juce::ScopedLock sl (songLock);
+            currentSong = song;
+            if (pendingSong == song) pendingSong = {};
+        }
+        metadataInFlight.store (false);
+    }).detach();
 }
 
 #else  // ---------- stub when neither LAME nor fdk-aac is available ----------

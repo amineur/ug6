@@ -118,10 +118,20 @@ private:
     juce::String pendingSong, currentSong, effectiveCodec;
     std::atomic<bool> songDirty { false };
     mutable juce::CriticalSection songLock;
+    // Le titrage part sur un petit fil detache : un Icecast lent ne doit jamais bloquer l'envoi du son.
+    std::atomic<bool> metadataInFlight { false };
     void sendMetadata();
 
-    juce::AbstractFifo       fifo       { 65536 };
-    juce::AudioBuffer<float> ringBuffer { 2, 65536 };
+    // ~10 s a 44,1 kHz : de quoi absorber un ecriture reseau lente sans perdre de son.
+    static constexpr int kRingSamples = 441000;
+    juce::AbstractFifo       fifo       { kRingSamples };
+    juce::AudioBuffer<float> ringBuffer { 2, kRingSamples };
+
+    // Journal : le handshake complet n'est imprime que si l'erreur precedente change ; les ecritures au plus
+    // toutes les 5 min.
+    juce::String lastLoggedError;
+    bool         handshakeLogged  = false;
+    juce::uint32 lastWriteLogMs   = 0;
 
     double sampleRate = 48000.0;
 

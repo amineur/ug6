@@ -56,5 +56,6 @@ private:
     std::unique_ptr<httplib::Server> server;
     std::thread listenerThread;
     std::atomic<bool> running { false };
+    std::atomic<int>  sseClients { 0 };               // flux /api/meters ouverts (503 au-dela de 4)
     juce::CriticalSection persistLock;
 };

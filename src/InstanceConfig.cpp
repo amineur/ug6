@@ -1,5 +1,7 @@
 #include "InstanceConfig.h"
 
+#include <iostream>
+
 InstanceConfig::InstanceConfig (int instancePort)
     : port (instancePort)
 {
@@ -47,10 +49,16 @@ InstanceState InstanceConfig::load (int numEncoders) const
 {
     InstanceState st;
     st.encoders.resize ((size_t) numEncoders);
-    if (! configFile.existsAsFile()) return st;
-
-    const auto parsed = juce::JSON::parse (configFile.loadFileAsString());
-    if (! parsed.isObject()) return st;
+    // Fichier principal vide ou illisible (coupure de courant pendant l'ecriture) : on reprend la copie .bak.
+    auto parsed = configFile.existsAsFile() ? juce::JSON::parse (configFile.loadFileAsString()) : juce::var();
+    if (! parsed.isObject())
+    {
+        const auto bak = configFile.getSiblingFile (configFile.getFileName() + ".bak");
+        if (! bak.existsAsFile()) return st;
+        parsed = juce::JSON::parse (bak.loadFileAsString());
+        if (! parsed.isObject()) { std::cerr << "[UG6] config et copie .bak illisibles : " << configFile.getFullPathName() << "\n" << std::flush; return st; }
+        std::cerr << "[UG6] config illisible, reprise de la copie .bak : " << bak.getFullPathName() << "\n" << std::flush;
+    }
     st.loaded = true;
 
     if (auto* arr = parsed.getProperty ("encoders", juce::var()).getArray())
@@ -111,7 +119,18 @@ bool InstanceConfig::save (const InstanceState& st) const
         if (dsp.isObject()) root->setProperty ("dsp", dsp);
     }
 
+    // Ecriture sure : .tmp ecrit et vide (flush) sur le disque, copie .bak de l'ancien fichier, puis renommage.
     const auto tmp = configFile.getSiblingFile (configFile.getFileName() + ".tmp");
-    if (! tmp.replaceWithText (juce::JSON::toString (juce::var (root)), false, false)) return false;
+    const auto bak = configFile.getSiblingFile (configFile.getFileName() + ".bak");
+    const auto text = juce::JSON::toString (juce::var (root));
+    tmp.deleteFile();
+    {
+        juce::FileOutputStream out (tmp);
+        if (out.failedToOpen()) return false;
+        out.setPosition (0); out.truncate();
+        if (! out.write (text.toRawUTF8(), text.getNumBytesAsUTF8())) return false;
+        out.flush();
+    }
+    if (configFile.existsAsFile() && configFile.getSize() > 0) configFile.copyFileTo (bak);
     return tmp.moveFileTo (configFile);
 }

@@ -66,12 +66,15 @@ int main (int argc, char** argv)
 
     std::signal (SIGINT,  signalHandler);
     std::signal (SIGTERM, signalHandler);
+   #ifndef _WIN32
+    std::signal (SIGPIPE, SIG_IGN);   // un socket ferme par Icecast ne doit pas tuer le processus
+   #endif
 
-    // Audio callbacks come from CoreAudio / WASAPI threads, not the main thread,
-    // so we can just sleep here while we wait for SIGINT. JUCE 8 removed
-    // runDispatchLoopUntil(); juce::Thread::sleep is the portable replacement.
+    // Les rappels audio viennent des fils CoreAudio / WASAPI, mais les notifications de changement de
+    // peripherique et les juce::Timer (surveillance du son, reprise du peripherique) passent par la file de
+    // messages : il faut la faire tourner ici (JUCE 7.0.12, JUCE_MODAL_LOOPS_PERMITTED=1).
     while (! shouldQuit.load())
-        juce::Thread::sleep (100);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
 
     std::cout << "Shutting down...\n";
     server.stop();

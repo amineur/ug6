@@ -194,7 +194,13 @@ void HttpServer::restore()
         engine.getBroadcastSender (i).setConfig (st.encoders[(size_t) i]);
     if (! st.loaded) return;
 
-    if (st.driver.isNotEmpty() && st.driver != engine.getCurrentDriverType()) engine.setDriverType (st.driver);
+    // Les erreurs d'ouverture sont journalisees par AudioEngine et visibles dans /api/state (device.error) ; l'entree
+    // demandee est retentee toutes les 10 s par son Timer si elle n'est pas encore la.
+    if (st.driver.isNotEmpty() && st.driver != engine.getCurrentDriverType())
+    {
+        const auto err = engine.setDriverType (st.driver);
+        if (err.isNotEmpty()) std::cerr << "[UG6] pilote « " << st.driver << " » : " << err << "\n" << std::flush;
+    }
     if (st.input.isNotEmpty())  engine.setInputDevice (st.input);
     if (st.output.isNotEmpty()) engine.setOutputDevice (st.output);
     engine.setSource (st.source == "input" ? AudioEngine::Source::AudioInput
@@ -203,8 +209,15 @@ void HttpServer::restore()
     if (st.dspJson.isNotEmpty()) PresetsStore::applyJson (st.dspJson, engine.getDsp());
     if (st.fallbackFile.isNotEmpty())
     {
-        engine.fallbackFile = st.fallbackFile;
-        if (engine.getFilePlayer().loadFile (juce::File (st.fallbackFile)).isEmpty()) engine.getFilePlayer().setLooping (true);
+        engine.setFallbackFile (st.fallbackFile);
+        const auto err = engine.getFilePlayer().loadFile (juce::File (st.fallbackFile));
+        if (err.isEmpty()) engine.getFilePlayer().setLooping (true);
+        else
+        {
+            // Le disque ou le partage peut arriver apres nous : on le dit, on l'expose, et le Timer reessaie toutes les 30 s.
+            std::cerr << "[UG6] fichier de secours illisible (" << err << ") : " << st.fallbackFile << "\n" << std::flush;
+            engine.fallbackFileMissing.store (true);
+        }
     }
     engine.fallbackSeconds.store ((float) st.fallbackSeconds);
     engine.fallbackOn.store (st.fallbackOn);
@@ -228,7 +241,7 @@ void HttpServer::persist()
     st.onAir   = engine.isOnAir();
     st.monitor = engine.isMonitorEnabled();
     st.dspJson = engine.getDsp().paramsToJson();
-    st.fallbackFile = engine.fallbackFile; st.fallbackOn = engine.fallbackOn.load(); st.fallbackSeconds = engine.fallbackSeconds.load();
+    st.fallbackFile = engine.getFallbackFile(); st.fallbackOn = engine.fallbackOn.load(); st.fallbackSeconds = engine.fallbackSeconds.load();
     instanceConfig.save (st);
 }
 
@@ -311,19 +324,25 @@ void HttpServer::start()
     server->set_payload_max_length (200 * 1024 * 1024);
     setupRoutes();
 
+    // Plus de fils que de flux SSE possibles (4) + requetes de la page : la reserve par defaut (8) s'epuisait.
+    server->new_task_queue = [] { return new httplib::ThreadPool (32); };
+
     listenerThread = std::thread ([this]
     {
         if (! server->listen ("127.0.0.1", port))
         {
-            DBG ("HttpServer: failed to listen on 127.0.0.1:" << port);
+            // Sans serveur, l'instance est injoignable et ne se reglera jamais : on sort avec un code clair pour que
+            // le superviseur (ou l'operateur) relance avec le bon port.
+            std::cerr << "[UG6] impossible d'ecouter sur 127.0.0.1:" << port << " (port deja pris ?)\n" << std::flush;
             running = false;
+            std::exit (2);
         }
     });
 }
 
 void HttpServer::stop()
 {
-    if (! running.exchange (false)) return;
+    running.store (false);
     if (server) server->stop();
     if (listenerThread.joinable()) listenerThread.join();
     server.reset();
@@ -362,12 +381,15 @@ std::string HttpServer::buildStateJson() const
       << ",\"device\":{"
             << "\"in\":\""  << jsonEscape (engine.getCurrentInputDevice())  << "\""
             << ",\"out\":\""<< jsonEscape (engine.getCurrentOutputDevice()) << "\""
-            << ",\"sampleRate\":" << engine.getCurrentSampleRate() << "}"
+            << ",\"sampleRate\":" << engine.getCurrentSampleRate()
+            << ",\"error\":\"" << jsonEscape (engine.getLastDeviceError()) << "\"}"
+      << ",\"audioStalled\":" << (engine.isAudioStalled() ? "true" : "false")
       << ",\"dsp\":"  << engine.getDsp().paramsToJson()
       << ",\"fallback\":{\"on\":" << (engine.fallbackOn.load() ? "true" : "false")
             << ",\"active\":" << (engine.fallbackActive.load() ? "true" : "false")
             << ",\"seconds\":" << engine.fallbackSeconds.load()
-            << ",\"file\":\"" << jsonEscape (engine.fallbackFile) << "\"}"
+            << ",\"fileMissing\":" << (engine.fallbackFileMissing.load() ? "true" : "false")
+            << ",\"file\":\"" << jsonEscape (engine.getFallbackFile()) << "\"}"
       << ",\"broadcast\":" << engine.getBroadcastSender (0).toJson();
     s << ",\"encoders\":[";
     for (int i = 0; i < AudioEngine::kNumEncoders; ++i) { if (i > 0) s << ","; s << engine.getBroadcastSender (i).toJson(); }
@@ -680,12 +702,13 @@ void HttpServer::setupRoutes()
         const auto parsed = juce::JSON::parse (juce::String::fromUTF8 (req.body.c_str(), (int) req.body.size()));
         if (! parsed.isObject()) { res.status = 400; res.set_content ("invalid JSON", "text/plain"); return; }
         const auto file = parsed.getProperty ("file", juce::var()).toString().trim();
-        if (file.isNotEmpty() && file != engine.fallbackFile)
+        if (file.isNotEmpty() && file != engine.getFallbackFile())
         {
             const auto err = engine.getFilePlayer().loadFile (juce::File (file));
             if (err.isNotEmpty()) { res.status = 400; res.set_content (err.toStdString(), "text/plain; charset=utf-8"); return; }
             engine.getFilePlayer().setLooping (true);
-            engine.fallbackFile = file;
+            engine.setFallbackFile (file);
+            engine.fallbackFileMissing.store (false);
         }
         if (parsed.hasProperty ("seconds")) engine.fallbackSeconds.store (juce::jlimit (3.0f, 120.0f, (float) (double) parsed.getProperty ("seconds", 10.0)));
         if (parsed.hasProperty ("on")) engine.fallbackOn.store ((bool) parsed.getProperty ("on", false));
@@ -709,8 +732,16 @@ void HttpServer::setupRoutes()
     });
 
     // --- SSE meters ---
+    // Chaque flux occupe un fil du serveur : au-dela de 4 (onglets oublies), on refuse pour garder l'API joignable.
     server->Get ("/api/meters", [this] (const httplib::Request&, httplib::Response& res)
     {
+        if (sseClients.load() >= 4)
+        {
+            res.status = 503;
+            res.set_content ("trop de flux /api/meters ouverts (4 max)", "text/plain; charset=utf-8");
+            return;
+        }
+        sseClients.fetch_add (1);
         res.set_header ("Cache-Control", "no-cache");
         res.set_chunked_content_provider (
             "text/event-stream",
@@ -721,8 +752,9 @@ void HttpServer::setupRoutes()
                 const auto data = "data: " + buildStateJson() + "\n\n";
                 if (! sink.write (data.c_str(), data.size())) return false;
 
-                std::this_thread::sleep_for (std::chrono::milliseconds (50));
+                std::this_thread::sleep_for (std::chrono::milliseconds (100));
                 return true;
-            });
+            },
+            [this] (bool /*success*/) { sseClients.fetch_sub (1); });
     });
 }

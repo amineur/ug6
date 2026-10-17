@@ -595,6 +595,17 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
         peakOutR.store (pkR, std::memory_order_relaxed);
         rmsOutL.store (std::sqrt (rmsOutLSmooth), std::memory_order_relaxed);
         rmsOutR.store (std::sqrt (rmsOutRSmooth), std::memory_order_relaxed);
+
+        // Garde-fou 24/7 : un NaN dans un filtre ne doit jamais partir a l'antenne ni s'y installer.
+        if (! std::isfinite (pkL + pkR))
+        {
+            buffer.clear();
+            reset();
+            rmsOutLSmooth = rmsOutRSmooth = 0.0f;
+            peakOutL.store (0.0f, std::memory_order_relaxed); peakOutR.store (0.0f, std::memory_order_relaxed);
+            rmsOutL.store (0.0f, std::memory_order_relaxed);  rmsOutR.store (0.0f, std::memory_order_relaxed);
+            nanResets.fetch_add (1, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -670,6 +681,7 @@ juce::String DspChain::paramsToJson() const
                 << ",\"rmsL\":"  << f (rmsInL.load())   << ",\"rmsR\":"  << f (rmsInR.load())  << "}"
         << ",\"out\":{\"peakL\":"<< f (peakOutL.load()) << ",\"peakR\":" << f (peakOutR.load())
                 << ",\"rmsL\":"  << f (rmsOutL.load())  << ",\"rmsR\":"  << f (rmsOutR.load()) << "}"
+        << ",\"nanResets\":" << nanResets.load()
       << "}";
 
     j << "}";
@@ -698,11 +710,22 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
     auto tokens = juce::StringArray::fromTokens (path, ".", "");
     if (tokens.size() < 1) return false;
 
+    // Bornes : une valeur hors plage (page, script, fichier) ne doit jamais faire diverger un filtre a l'antenne.
+    if (! std::isfinite (value)) return false;
+    const float maxHz = sampleRate > 0.0 ? (float) (0.45 * sampleRate) : 20000.0f;
+    auto hz    = [maxHz] (float v) { return juce::jlimit (10.0f, maxHz, v); };
+    auto db    = [] (float v)      { return juce::jlimit (-24.0f, 24.0f, v); };
+    auto ratio = [] (float v)      { return juce::jlimit (1.0f, 20.0f, v); };
+    auto q     = [] (float v)      { return juce::jlimit (0.1f, 10.0f, v); };
+    auto ceil  = [] (float v)      { return juce::jlimit (-24.0f, 0.0f, v); };
+    auto ms    = [] (float v)      { return juce::jlimit (0.1f, 10000.0f, v); };
+    auto thr   = [] (float v)      { return juce::jlimit (-60.0f, 0.0f, v); };
+
     const auto root = tokens[0];
 
     if (root == "bypass")        { bypass.store (value > 0.5f); return true; }
-    if (root == "inputGainDb")   { inputGainDb.store (value);   return true; }
-    if (root == "outputGainDb")  { outputGainDb.store (value);  return true; }
+    if (root == "inputGainDb")   { inputGainDb.store (db (value));   return true; }
+    if (root == "outputGainDb")  { outputGainDb.store (db (value));  return true; }
 
     if (root == "agc2" && tokens.size() == 2)
     {
@@ -736,17 +759,17 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
     if (root == "hpf" && tokens.size() == 2)
     {
         if (tokens[1] == "on")     { hpfOn.store (value > 0.5f); return true; }
-        if (tokens[1] == "freqHz") { hpfFreqHz.store (value);    return true; }
+        if (tokens[1] == "freqHz") { hpfFreqHz.store (hz (value)); return true; }
     }
 
     if (root == "agc" && tokens.size() == 2)
     {
         if (tokens[1] == "on")          { agcOn.store (value > 0.5f);     return true; }
-        if (tokens[1] == "thresholdDb") { agcThresholdDb.store (value);   return true; }
-        if (tokens[1] == "ratio")       { agcRatio.store (value);         return true; }
-        if (tokens[1] == "attackMs")    { agcAttackMs.store (value);      return true; }
-        if (tokens[1] == "releaseMs")   { agcReleaseMs.store (value);     return true; }
-        if (tokens[1] == "makeupDb")    { agcMakeupDb.store (value);      return true; }
+        if (tokens[1] == "thresholdDb") { agcThresholdDb.store (thr (value));   return true; }
+        if (tokens[1] == "ratio")       { agcRatio.store (ratio (value));       return true; }
+        if (tokens[1] == "attackMs")    { agcAttackMs.store (ms (value));       return true; }
+        if (tokens[1] == "releaseMs")   { agcReleaseMs.store (ms (value));      return true; }
+        if (tokens[1] == "makeupDb")    { agcMakeupDb.store (db (value));       return true; }
     }
 
     if (root == "eq" && tokens.size() == 3)
@@ -754,16 +777,16 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
         const int idx = tokens[1].getIntValue();
         if (idx < 0 || idx >= kNumEqBands) return false;
         if (tokens[2] == "on")     { eq[idx].on.store (value > 0.5f); return true; }
-        if (tokens[2] == "freq")   { eq[idx].freq.store (value);      return true; }
-        if (tokens[2] == "gainDb") { eq[idx].gainDb.store (value);    return true; }
-        if (tokens[2] == "q")      { eq[idx].q.store (value);         return true; }
+        if (tokens[2] == "freq")   { eq[idx].freq.store (hz (value));   return true; }
+        if (tokens[2] == "gainDb") { eq[idx].gainDb.store (db (value)); return true; }
+        if (tokens[2] == "q")      { eq[idx].q.store (q (value));       return true; }
     }
 
     if (root == "xover" && tokens.size() == 2)
     {
         const int idx = tokens[1].getIntValue();
         if (idx < 0 || idx >= kNumXovers) return false;
-        xoverFreq[idx].store (value);
+        xoverFreq[idx].store (hz (value));
         return true;
     }
 
@@ -771,19 +794,19 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
     {
         const int idx = tokens[1].getIntValue();
         if (idx < 0 || idx >= kNumBands) return false;
-        if (tokens[2] == "thresholdDb") { comp[idx].thresholdDb.store (value); return true; }
-        if (tokens[2] == "ratio")       { comp[idx].ratio.store       (value); return true; }
-        if (tokens[2] == "attackMs")    { comp[idx].attackMs.store    (value); return true; }
-        if (tokens[2] == "releaseMs")   { comp[idx].releaseMs.store   (value); return true; }
-        if (tokens[2] == "makeupDb")    { comp[idx].makeupDb.store    (value); return true; }
+        if (tokens[2] == "thresholdDb") { comp[idx].thresholdDb.store (thr (value));   return true; }
+        if (tokens[2] == "ratio")       { comp[idx].ratio.store       (ratio (value)); return true; }
+        if (tokens[2] == "attackMs")    { comp[idx].attackMs.store    (ms (value));    return true; }
+        if (tokens[2] == "releaseMs")   { comp[idx].releaseMs.store   (ms (value));    return true; }
+        if (tokens[2] == "makeupDb")    { comp[idx].makeupDb.store    (db (value));    return true; }
     }
 
     if (root == "lim" && tokens.size() == 2)
     {
-        if (tokens[1] == "ceilingDb") { limCeilingDb.store (value); return true; }
-        if (tokens[1] == "releaseMs") { limReleaseMs.store (value); return true; }
+        if (tokens[1] == "ceilingDb") { limCeilingDb.store (ceil (value)); return true; }
+        if (tokens[1] == "releaseMs") { limReleaseMs.store (ms (value));   return true; }
         if (tokens[1] == "lookahead")   { limLookahead.store (value > 0.5f); return true; }
-        if (tokens[1] == "lookaheadMs") { limLookaheadMs.store (juce::jlimit (1.0f, 40.0f, value)); return true; }
+        if (tokens[1] == "lookaheadMs") { limLookaheadMs.store (juce::jlimit (0.0f, 20.0f, value)); return true; }
         if (tokens[1] == "truePeak")    { limTruePeak.store (value > 0.5f); return true; }
     }
 

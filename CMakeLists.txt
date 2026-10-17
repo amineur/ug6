@@ -141,7 +141,7 @@ target_compile_definitions(UG6Broadcaster PRIVATE
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_REPORT_APP_USAGE=0
     JUCE_STRICT_REFCOUNTEDPOINTER=1
-    JUCE_MODAL_LOOPS_PERMITTED=0
+    JUCE_MODAL_LOOPS_PERMITTED=1       # runDispatchLoopUntil() dans Main.cpp (timers + notifications de peripherique)
     JUCE_USE_MP3AUDIOFORMAT=1          # MP3 decode for the FilePlayer
 )
 
