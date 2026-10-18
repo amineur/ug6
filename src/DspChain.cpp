@@ -68,6 +68,9 @@ void DspChain::prepare (double sr, int blockSize, int channels)
     agc.prepare (sr);
     for (auto& c : bandComps) c.prepare (sr);
     limiter.prepare (sr);
+    clipOs = std::make_unique<juce::dsp::Oversampling<float>> ((size_t) numChannels, 1,
+                 juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
+    clipOs->initProcessing ((size_t) blockSize);
     resetLookahead (juce::jlimit (16, kMaxLook - 1, (int) std::round (limLookaheadMs.load() * 0.001 * sr)));
 
     for (auto& f : agcSplit) { f.prepare (spec); f.reset(); }
@@ -457,6 +460,30 @@ void DspChain::process (juce::AudioBuffer<float>& buffer)
     const float outGainLin = juce::Decibels::decibelsToGain (outputGainDb.load (std::memory_order_relaxed));
     buffer.applyGain (outGainLin);
 
+    // ---------- 7b. Ecreteur doux (x2) ----------
+    if (clipOn.load (std::memory_order_relaxed) && clipOs != nullptr && channels == numChannels && numSamples <= maxBlockSize)
+    {
+        const float c = juce::Decibels::decibelsToGain (clipCeilingDb.load (std::memory_order_relaxed));
+        const float k = c * juce::Decibels::decibelsToGain (-juce::jmax (0.1f, clipKneeDb.load (std::memory_order_relaxed)));
+        juce::dsp::AudioBlock<float> blk (buffer.getArrayOfWritePointers(), (size_t) channels, (size_t) numSamples);
+        auto up = clipOs->processSamplesUp (blk);
+        float maxIn = 0.0f;
+        for (size_t ch = 0; ch < up.getNumChannels(); ++ch)
+        {
+            auto* d = up.getChannelPointer (ch);
+            for (size_t i = 0; i < up.getNumSamples(); ++i)
+            {
+                const float x = d[i], a = std::abs (x);
+                maxIn = juce::jmax (maxIn, a);
+                if (a > k) d[i] = std::copysign (k + (c - k) * std::tanh ((a - k) / (c - k)), x);
+            }
+        }
+        clipOs->processSamplesDown (blk);
+        clipGrDb.store (maxIn > k ? juce::Decibels::gainToDecibels ((k + (c - k) * std::tanh ((maxIn - k) / (c - k))) / maxIn) : 0.0f,
+                        std::memory_order_relaxed);
+    }
+    else clipGrDb.store (0.0f, std::memory_order_relaxed);
+
     // ---------- 8. Limiteur ----------
     const bool look = limLookahead.load (std::memory_order_relaxed);
     if (! look)
@@ -626,6 +653,7 @@ juce::String DspChain::paramsToJson() const
       << ",\"stereo\":{\"on\":" << b (stereoOn.load()) << ",\"width\":" << f (stereoWidth.load()) << "}"
       << ",\"bandLim\":{\"on\":" << b (bandLimOn.load()) << ",\"ceilingDb\":" << f (bandLimCeilingDb.load()) << ",\"releaseMs\":" << f (bandLimReleaseMs.load()) << "}"
       << ",\"bassClip\":{\"on\":" << b (bassClipOn.load()) << ",\"ceilingDb\":" << f (bassClipDb.load()) << ",\"freqHz\":" << f (bassClipHz.load()) << "}"
+      << ",\"clip\":{\"on\":" << b (clipOn.load()) << ",\"ceilingDb\":" << f (clipCeilingDb.load()) << ",\"kneeDb\":" << f (clipKneeDb.load()) << ",\"gr\":" << f (clipGrDb.load()) << "}"
       << ",\"loud\":{\"momentary\":" << f (loudMomentary.load()) << ",\"minute\":" << f (loudMinute.load()) << "}"
       << ",\"midroll\":{\"on\":" << b (midrollOn.load()) << ",\"freqHz\":" << f (midrollFreqHz.load()) << "}"
       << ",\"hpf\":{\"on\":"  << b (hpfOn.load())     << ",\"freqHz\":" << f (hpfFreqHz.load()) << "}"
@@ -742,6 +770,12 @@ bool DspChain::setParamByPath (const juce::String& path, float value)
         if (tokens[1] == "on")        { bandLimOn.store (value > 0.5f); return true; }
         if (tokens[1] == "ceilingDb") { bandLimCeilingDb.store (juce::jlimit (-24.0f, 0.0f, value)); return true; }
         if (tokens[1] == "releaseMs") { bandLimReleaseMs.store (juce::jlimit (5.0f, 500.0f, value)); return true; }
+    }
+    if (root == "clip" && tokens.size() == 2)
+    {
+        if (tokens[1] == "on")        { clipOn.store (value > 0.5f); return true; }
+        if (tokens[1] == "ceilingDb") { clipCeilingDb.store (juce::jlimit (-12.0f, 0.0f, value)); return true; }
+        if (tokens[1] == "kneeDb")    { clipKneeDb.store (juce::jlimit (0.5f, 12.0f, value)); return true; }
     }
     if (root == "bassClip" && tokens.size() == 2)
     {

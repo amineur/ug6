@@ -450,6 +450,13 @@
               <input type="range" min="80" max="350" step="10" :value="state.dsp.bassClip.freqHz" @input="setParam('bassClip.freqHz', $event.target.value)" class="w-full accent-red-500" />
             </div>
             <div>
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" :checked="state.dsp.clip.on" @change="setParam('clip.on', $event.target.checked ? 1 : 0)" class="accent-red-500" /> Écrêteur doux (avant le limiteur)</label>
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Plafond</span><span class="mono text-gray-300" x-text="state.dsp.clip.ceilingDb.toFixed(1) + ' dB · écrête ' + state.dsp.clip.gr.toFixed(1) + ' dB'"></span></div>
+              <input type="range" min="-8" max="0" step="0.5" :value="state.dsp.clip.ceilingDb" @input="setParam('clip.ceilingDb', $event.target.value)" class="w-full accent-red-500" />
+              <div class="flex justify-between mt-1"><span class="text-gray-500">Genou (douceur)</span><span class="mono text-gray-300" x-text="state.dsp.clip.kneeDb.toFixed(1) + ' dB'"></span></div>
+              <input type="range" min="0.5" max="8" step="0.5" :value="state.dsp.clip.kneeDb" @input="setParam('clip.kneeDb', $event.target.value)" class="w-full accent-red-500" />
+            </div>
+            <div>
               <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" :checked="state.fallback.on" @change="setFallback({on: $event.target.checked})" class="accent-emerald-500" /> Secours sur silence</label>
               <div class="flex justify-between mt-1"><span class="text-gray-500">Après</span><span class="mono text-gray-300" x-text="state.fallback.seconds.toFixed(0) + ' s'"></span></div>
               <input type="range" min="3" max="60" step="1" :value="state.fallback.seconds" @change="setFallback({seconds: +$event.target.value})" class="w-full accent-emerald-500" />
@@ -595,6 +602,7 @@ function emptyDsp() {
     stereo: { on: false, width: 1.0 },
     bandLim: { on: false, ceilingDb: -4, releaseMs: 40 },
     bassClip: { on: false, ceilingDb: -4, freqHz: 150 },
+    clip: { on: false, ceilingDb: -2, kneeDb: 3, gr: 0 },
     loud: { momentary: -70, minute: -70 },
     meters: { in: {peakL:0, peakR:0, rmsL:0, rmsR:0}, out: {peakL:0, peakR:0, rmsL:0, rmsR:0} }
   };

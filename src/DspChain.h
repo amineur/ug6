@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <memory>
 #include <cmath>
 
 /**
@@ -106,6 +107,15 @@ public:
     std::atomic<bool>  bassClipOn  { false };
     std::atomic<float> bassClipDb  { -4.0f };
     std::atomic<float> bassClipHz  { 150.0f };
+
+    // --- Ecreteur doux final (Amine, 18/10/2026 : Kompa « plus faible que DAB ») : juste avant le limiteur, il rabote
+    //     les cretes tres courtes (attaques) au lieu de faire baisser tout le son ; c'est l'etage qui donne au Sound4 de
+    //     DAB son volume. Sureechantillonne x2 (pas de repliement dans l'aigu). Au-dessus du genou (plafond - genou),
+    //     courbe tanh douce qui ne depasse jamais le plafond ; le limiteur ne gere plus que le reste.
+    std::atomic<bool>  clipOn        { false };
+    std::atomic<float> clipCeilingDb { -2.0f };
+    std::atomic<float> clipKneeDb    { 3.0f };
+    std::atomic<float> clipGrDb      { 0.0f };          // ecretage maximal du dernier bloc (dB, <= 0)
 
     // --- Mesure de volume (comme la barre « Loudness » du Sound4) : LUFS momentane (400 ms) et moyenne sur 1 min ---
     std::atomic<float> loudMomentary { -70.0f };
@@ -228,6 +238,7 @@ private:
 
     // Limiteur a anticipation : tampons circulaires (signal + Midroll retardes ensemble), filtre de minimum glissant
     // et moyenne glissante sur la meme longueur (gain toujours <= au gain requis quand la crete sort du retard).
+    std::unique_ptr<juce::dsp::Oversampling<float>> clipOs;   // cree dans prepare (jamais dans le fil audio)
     static constexpr int kMaxLook = 2048;                 // ~42 ms a 48 kHz
     std::array<std::array<float, kMaxLook>, 2> laSig {}, laMid {};
     std::array<float, kMaxLook> laReq {};                 // gain requis par echantillon
