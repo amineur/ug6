@@ -8,6 +8,21 @@ namespace
     // crash on legacy preset files that include meters / GR snapshots.
     void applyJsonRecursively (const juce::var& v, const juce::String& prefix, DspChain& dsp)
     {
+        // Les tableaux d'abord : pour JUCE, un tableau est aussi un objet (isObject() vrai,
+        // getDynamicObject() nul) — teste apres, eq[] et comp[] etaient ignores en silence.
+        if (v.isArray())
+        {
+            if (auto* arr = v.getArray())
+            {
+                for (int i = 0; i < arr->size(); ++i)
+                {
+                    const juce::String next = prefix + "." + juce::String (i);
+                    applyJsonRecursively ((*arr)[i], next, dsp);
+                }
+            }
+            return;
+        }
+
         if (v.isObject())
         {
             if (auto* obj = v.getDynamicObject())
@@ -17,19 +32,6 @@ namespace
                     const juce::String key = prop.name.toString();
                     const juce::String next = prefix.isEmpty() ? key : (prefix + "." + key);
                     applyJsonRecursively (prop.value, next, dsp);
-                }
-            }
-            return;
-        }
-
-        if (v.isArray())
-        {
-            if (auto* arr = v.getArray())
-            {
-                for (int i = 0; i < arr->size(); ++i)
-                {
-                    const juce::String next = prefix + "." + juce::String (i);
-                    applyJsonRecursively ((*arr)[i], next, dsp);
                 }
             }
             return;
