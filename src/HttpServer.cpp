@@ -234,8 +234,10 @@ void HttpServer::persist()
     InstanceState st;
     for (int i = 0; i < AudioEngine::kNumEncoders; ++i) st.encoders.push_back (engine.getBroadcastSender (i).getConfig());
     st.driver  = engine.getCurrentDriverType();
-    st.input   = engine.getCurrentInputDevice();  if (st.input == "<default>")  st.input = {};
-    st.output  = engine.getCurrentOutputDevice(); if (st.output == "<default>") st.output = {};
+    // Entree / sortie VOULUES, pas celles ouvertes en ce moment : si la carte virtuelle a disparu et que l'instance
+    // tourne provisoirement sur l'entree par defaut, la config doit garder la Line demandee (retentee toutes les 10 s).
+    st.input   = engine.getWantedInput();
+    st.output  = engine.getWantedOutput();
     st.source  = engine.getSource() == AudioEngine::Source::AudioInput ? "input"
                : engine.getSource() == AudioEngine::Source::File ? "file" : "generator";
     st.onAir   = engine.isOnAir();
