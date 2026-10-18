@@ -186,3 +186,40 @@ if(APPLE)
         XCODE_ATTRIBUTE_CLANG_CXX_LIBRARY "libc++"
     )
 endif()
+
+# ---------------------------------------------------------------------------
+# Tests (cmake -DUG6_BUILD_TESTS=ON, puis ctest) — hors du binaire livre.
+# ---------------------------------------------------------------------------
+option(UG6_BUILD_TESTS "Construire les tests UG6" OFF)
+
+if(UG6_BUILD_TESTS)
+    enable_testing()
+
+    juce_add_console_app(UG6Tests PRODUCT_NAME "UG6 Tests")
+    target_sources(UG6Tests PRIVATE
+        tests/PresetsTest.cpp
+        src/DspChain.cpp
+        src/Presets.cpp
+    )
+    target_include_directories(UG6Tests PRIVATE src)
+    target_compile_definitions(UG6Tests PRIVATE
+        JUCE_USE_CURL=0
+        JUCE_WEB_BROWSER=0
+        JUCE_DISPLAY_SPLASH_SCREEN=0
+        JUCE_REPORT_APP_USAGE=0
+        JUCE_STRICT_REFCOUNTEDPOINTER=1
+    )
+    if(MSVC)
+        target_compile_options(UG6Tests PRIVATE /utf-8)
+    endif()
+    target_link_libraries(UG6Tests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_data_structures
+        juce::juce_dsp
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME presets COMMAND UG6Tests)
+endif()

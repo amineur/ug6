@@ -25,9 +25,13 @@ jobs:
           -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
           -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
           -DCMAKE_BUILD_TYPE=Release
+          -DUG6_BUILD_TESTS=ON
 
       - name: Build
         run: cmake --build build -j
+
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
