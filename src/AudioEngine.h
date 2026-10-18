@@ -81,8 +81,15 @@ public:
     // ---- device management ----
     juce::AudioDeviceManager& getDeviceManager() noexcept { return deviceManager; }
 
+    // Noms des peripheriques ouverts : copies mises en cache par le Timer (fil des messages) et apres chaque
+    // changement, lues par les fils HTTP sans toucher a l'AudioDeviceManager (qui n'est pas protege contre eux).
     juce::String getCurrentInputDevice() const;
     juce::String getCurrentOutputDevice() const;
+
+    // Entree / sortie VOULUES (demarrage ou API), vides = peripherique par defaut. C'est ce que persist() enregistre :
+    // un repli temporaire sur l'entree par defaut ne doit jamais etre grave dans la config.
+    juce::String getWantedInput() const;
+    juce::String getWantedOutput() const;
     double       getCurrentSampleRate() const { return sampleRate; }
 
     juce::StringArray getInputDeviceNames();
@@ -114,10 +121,15 @@ private:
     void timerCallback() override;
     juce::String applyDeviceSetup (juce::AudioDeviceManager::AudioDeviceSetup setup, const juce::String& what);
     void setDeviceError (const juce::String& what, const juce::String& err);
+    void refreshDeviceCache();                    // a appeler sous deviceLock (ou depuis le fil des messages)
+    juce::String readDriverTypeName() const;      // nom du pilote lu directement (sous deviceLock)
 
     juce::AudioDeviceManager deviceManager;
-    juce::CriticalSection deviceLock;             // setInputDevice / setOutputDevice / setDriverType / reprise
+    mutable juce::CriticalSection deviceLock;     // setInputDevice / setOutputDevice / setDriverType / reprise / listes
     juce::String wantedInput;                     // entree demandee (demarrage ou API), retentee toutes les 10 s
+    juce::String wantedOutput;                    // sortie demandee (demarrage ou API)
+    juce::String cachedInput, cachedOutput, cachedDriver;   // copies lues par les fils HTTP
+    mutable juce::CriticalSection deviceCacheLock;
     juce::String lastDeviceError;
     mutable juce::CriticalSection deviceErrorLock;
 
@@ -127,8 +139,11 @@ private:
 
     std::atomic<juce::uint32> lastCallbackMs { 0 };
     std::atomic<bool>         audioStalled   { false };
+    // Compteur ms 32 bits : il reboucle tous les 49,7 jours. On ne compare donc jamais deux instants (now >= echeance),
+    // seulement des ecarts non signes (juce::uint32) (now - debut) >= delai, justes a travers le rebouclage.
     int          restartBackoffMs = 1000;
-    juce::uint32 nextRestartMs    = 0;
+    juce::uint32 lastRestartMs    = 0;            // instant de la derniere reouverture
+    juce::uint32 restartWaitMs    = 0;            // attente avant la suivante (0 = tout de suite)
     juce::uint32 lastInputRetryMs = 0;
     juce::uint32 lastFallbackRetryMs = 0;
 

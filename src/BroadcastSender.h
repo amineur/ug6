@@ -120,6 +120,9 @@ private:
     mutable juce::CriticalSection songLock;
     // Le titrage part sur un petit fil detache : un Icecast lent ne doit jamais bloquer l'envoi du son.
     std::atomic<bool> metadataInFlight { false };
+    // Titre refuse ou serveur injoignable : il reste en attente et repart au plus tot a cet instant
+    // (getMillisecondCounterHiRes, en ms, ne reboucle pas) — pas de rafale de requetes vers Icecast.
+    std::atomic<double> metadataRetryAtMs { 0.0 };
     void sendMetadata();
 
     // ~10 s a 44,1 kHz : de quoi absorber un ecriture reseau lente sans perdre de son.
@@ -132,6 +135,9 @@ private:
     juce::String lastLoggedError;
     bool         handshakeLogged  = false;
     juce::uint32 lastWriteLogMs   = 0;
+    // Compteurs du journal : membres (un par envoi, plus de « static » partage entre les 4 fils d'envoi), 64 bits.
+    std::atomic<juce::int64> writeCallCount  { 0 };
+    std::atomic<juce::int64> zeroEncodeCount { 0 };
 
     double sampleRate = 48000.0;
 

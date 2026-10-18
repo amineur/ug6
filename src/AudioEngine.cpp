@@ -25,6 +25,10 @@ void AudioEngine::initialise()
 
     deviceManager.addAudioCallback (this);
     lastCallbackMs.store (juce::Time::getMillisecondCounter());
+    {
+        const juce::ScopedLock sl (deviceLock);
+        refreshDeviceCache();
+    }
     startTimer (500);
 }
 
@@ -60,20 +64,45 @@ void AudioEngine::setDeviceError (const juce::String& what, const juce::String& 
     if (err.isNotEmpty()) std::cerr << "[Audio] " << lastDeviceError << "\n" << std::flush;
 }
 
+// Copie des noms courants, sous deviceLock : les fils HTTP (etat, SSE a 20 Hz, persist) ne lisent plus que ce cache.
+void AudioEngine::refreshDeviceCache()
+{
+    const auto setup  = deviceManager.getAudioDeviceSetup();
+    const auto driver = readDriverTypeName();
+    const juce::ScopedLock sl (deviceCacheLock);
+    cachedInput  = setup.inputDeviceName.isEmpty()  ? juce::String ("<default>") : setup.inputDeviceName;
+    cachedOutput = setup.outputDeviceName.isEmpty() ? juce::String ("<default>") : setup.outputDeviceName;
+    cachedDriver = driver;
+}
+
 juce::String AudioEngine::getCurrentInputDevice() const
 {
-    auto setup = const_cast<juce::AudioDeviceManager&> (deviceManager).getAudioDeviceSetup();
-    return setup.inputDeviceName.isEmpty() ? juce::String ("<default>") : setup.inputDeviceName;
+    const juce::ScopedLock sl (deviceCacheLock);
+    return cachedInput;
 }
 
 juce::String AudioEngine::getCurrentOutputDevice() const
 {
-    auto setup = const_cast<juce::AudioDeviceManager&> (deviceManager).getAudioDeviceSetup();
-    return setup.outputDeviceName.isEmpty() ? juce::String ("<default>") : setup.outputDeviceName;
+    const juce::ScopedLock sl (deviceCacheLock);
+    return cachedOutput;
 }
 
+juce::String AudioEngine::getWantedInput() const
+{
+    const juce::ScopedLock sl (deviceLock);
+    return wantedInput;
+}
+
+juce::String AudioEngine::getWantedOutput() const
+{
+    const juce::ScopedLock sl (deviceLock);
+    return wantedOutput;
+}
+
+// Listes de peripheriques (/api/devices, fil HTTP) : scanForDevices() touche l'AudioDeviceManager, donc sous deviceLock.
 juce::StringArray AudioEngine::getInputDeviceNames()
 {
+    const juce::ScopedLock sl (deviceLock);
     auto* type = deviceManager.getCurrentDeviceTypeObject();
     if (! type) return {};
     type->scanForDevices();
@@ -82,6 +111,7 @@ juce::StringArray AudioEngine::getInputDeviceNames()
 
 juce::StringArray AudioEngine::getOutputDeviceNames()
 {
+    const juce::ScopedLock sl (deviceLock);
     auto* type = deviceManager.getCurrentDeviceTypeObject();
     if (! type) return {};
     type->scanForDevices();
@@ -108,6 +138,7 @@ juce::String AudioEngine::applyDeviceSetup (juce::AudioDeviceManager::AudioDevic
         if (back.isNotEmpty()) std::cerr << "[Audio] retour au reglage precedent impossible : " << back << "\n" << std::flush;
     }
     setDeviceError (what, err);
+    refreshDeviceCache();
     return err;
 }
 
@@ -124,20 +155,28 @@ juce::String AudioEngine::setInputDevice (const juce::String& name)
 juce::String AudioEngine::setOutputDevice (const juce::String& name)
 {
     const juce::ScopedLock sl (deviceLock);
+    wantedOutput = name;
     auto setup = deviceManager.getAudioDeviceSetup();
     setup.outputDeviceName = name;
     setup.useDefaultOutputChannels = true;
     return applyDeviceSetup (setup, "sortie « " + name + " »");
 }
 
-juce::String AudioEngine::getCurrentDriverType() const
+juce::String AudioEngine::readDriverTypeName() const
 {
     auto* type = const_cast<juce::AudioDeviceManager&> (deviceManager).getCurrentDeviceTypeObject();
     return type != nullptr ? type->getTypeName() : juce::String();
 }
 
+juce::String AudioEngine::getCurrentDriverType() const
+{
+    const juce::ScopedLock sl (deviceCacheLock);
+    return cachedDriver;
+}
+
 juce::StringArray AudioEngine::getAvailableDriverTypes()
 {
+    const juce::ScopedLock sl (deviceLock);
     juce::StringArray names;
     for (auto* t : deviceManager.getAvailableDeviceTypes())
         if (t != nullptr) names.add (t->getTypeName());
@@ -150,9 +189,10 @@ juce::String AudioEngine::setDriverType (const juce::String& typeName)
     // Switching the backend reinitialises the device list and may open a new
     // default device. JUCE handles the close/reopen internally.
     deviceManager.setCurrentAudioDeviceType (typeName, true);
+    refreshDeviceCache();
 
     // Verify the switch took.
-    if (getCurrentDriverType() != typeName)
+    if (readDriverTypeName() != typeName)
         return "impossible de basculer sur le driver « " + typeName + " »";
     return {};
 }
@@ -203,24 +243,27 @@ void AudioEngine::timerCallback()
         const juce::ScopedLock sl (deviceLock);
         auto* dev = deviceManager.getCurrentAudioDevice();
         const bool shouldRun = dev != nullptr && dev->isPlaying();
-        const bool stalled   = shouldRun && now - lastCallbackMs.load (std::memory_order_relaxed) > 3000;
+        // Ecart signe : le rappel audio peut ecrire un instant posterieur a « now » entre les deux lectures ; en non
+        // signe l'ecart deviendrait enorme et ferait croire a un blocage (reouverture du peripherique pour rien).
+        const bool stalled   = shouldRun && (juce::int32) (now - lastCallbackMs.load (std::memory_order_relaxed)) > 3000;
         if (stalled != audioStalled.load())
         {
             audioStalled.store (stalled);
             if (! stalled) { restartBackoffMs = 1000; std::cerr << "[Audio] le rappel audio est reparti\n" << std::flush; }
         }
-        if (stalled && now >= nextRestartMs)
+        if (stalled && (juce::uint32) (now - lastRestartMs) >= restartWaitMs)
         {
             std::cerr << "[Audio] aucun rappel audio depuis 3 s : reouverture du peripherique (prochain essai dans "
                       << restartBackoffMs / 1000 << " s)\n" << std::flush;
             deviceManager.closeAudioDevice();
             deviceManager.restartLastAudioDevice();
             lastCallbackMs.store (now);
-            nextRestartMs    = now + (juce::uint32) restartBackoffMs;
+            lastRestartMs    = now;
+            restartWaitMs    = (juce::uint32) restartBackoffMs;
             restartBackoffMs = juce::jmin (restartBackoffMs * 2, 30000);
         }
 
-        if (wantedInput.isNotEmpty() && now - lastInputRetryMs >= 10000 && ! stalled)
+        if (wantedInput.isNotEmpty() && (juce::uint32) (now - lastInputRetryMs) >= 10000 && ! stalled)
         {
             lastInputRetryMs = now;
             if (deviceManager.getAudioDeviceSetup().inputDeviceName != wantedInput)
@@ -232,9 +275,11 @@ void AudioEngine::timerCallback()
                 applyDeviceSetup (setup, "entree « " + wantedInput + " »");
             }
         }
+
+        refreshDeviceCache();                     // noms lus par les fils HTTP (une fois par 500 ms)
     }
 
-    if (fallbackFileMissing.load() && now - lastFallbackRetryMs >= 30000)
+    if (fallbackFileMissing.load() && (juce::uint32) (now - lastFallbackRetryMs) >= 30000)
     {
         lastFallbackRetryMs = now;
         const auto path = getFallbackFile();

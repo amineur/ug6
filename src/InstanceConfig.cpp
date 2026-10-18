@@ -1,6 +1,17 @@
 #include "InstanceConfig.h"
 
+#include <cstdio>
 #include <iostream>
+
+#ifdef _WIN32
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN 1
+ #endif
+ #ifndef NOMINMAX
+  #define NOMINMAX 1
+ #endif
+ #include <windows.h>
+#endif
 
 InstanceConfig::InstanceConfig (int instancePort)
     : port (instancePort)
@@ -49,15 +60,30 @@ InstanceState InstanceConfig::load (int numEncoders) const
 {
     InstanceState st;
     st.encoders.resize ((size_t) numEncoders);
-    // Fichier principal vide ou illisible (coupure de courant pendant l'ecriture) : on reprend la copie .bak.
-    auto parsed = configFile.existsAsFile() ? juce::JSON::parse (configFile.loadFileAsString()) : juce::var();
+    // Fichier principal absent, vide ou illisible (coupure de courant pendant l'ecriture) : on reprend la copie .bak,
+    // puis le .tmp (coupure entre l'ecriture du .tmp et son renommage, sans .bak precedent).
+    const auto parseFile = [] (const juce::File& f) { return f.existsAsFile() ? juce::JSON::parse (f.loadFileAsString()) : juce::var(); };
+    auto parsed = parseFile (configFile);
     if (! parsed.isObject())
     {
-        const auto bak = configFile.getSiblingFile (configFile.getFileName() + ".bak");
-        if (! bak.existsAsFile()) return st;
-        parsed = juce::JSON::parse (bak.loadFileAsString());
-        if (! parsed.isObject()) { std::cerr << "[UG6] config et copie .bak illisibles : " << configFile.getFullPathName() << "\n" << std::flush; return st; }
-        std::cerr << "[UG6] config illisible, reprise de la copie .bak : " << bak.getFullPathName() << "\n" << std::flush;
+        bool anyFile = configFile.existsAsFile();
+        for (const char* ext : { ".bak", ".tmp" })
+        {
+            const auto other = configFile.getSiblingFile (configFile.getFileName() + ext);
+            if (! other.existsAsFile()) continue;
+            anyFile = true;
+            parsed = parseFile (other);
+            if (parsed.isObject())
+            {
+                std::cerr << "[UG6] config absente ou illisible, reprise de la copie : " << other.getFullPathName() << "\n" << std::flush;
+                break;
+            }
+        }
+        if (! parsed.isObject())
+        {
+            if (anyFile) std::cerr << "[UG6] config, .bak et .tmp illisibles : " << configFile.getFullPathName() << "\n" << std::flush;
+            return st;
+        }
     }
     st.loaded = true;
 
@@ -123,14 +149,37 @@ bool InstanceConfig::save (const InstanceState& st) const
     const auto tmp = configFile.getSiblingFile (configFile.getFileName() + ".tmp");
     const auto bak = configFile.getSiblingFile (configFile.getFileName() + ".bak");
     const auto text = juce::JSON::toString (juce::var (root));
+    const auto* bytes = text.toRawUTF8();
+    const auto  numBytes = text.getNumBytesAsUTF8();
+
+   #ifdef _WIN32
+    // Windows : juce::File::moveFileTo efface d'abord la cible puis renomme — une coupure entre les deux laissait
+    // AUCUN fichier de config. Ici : .tmp ecrit puis FlushFileBuffers (donnees sur le disque), et remplacement en
+    // une seule operation par MoveFileExW (MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH).
+    {
+        const HANDLE h = CreateFileW (tmp.getFullPathName().toWideCharPointer(), GENERIC_WRITE, 0, nullptr,
+                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        DWORD written = 0;
+        const BOOL okWrite = WriteFile (h, bytes, (DWORD) numBytes, &written, nullptr);
+        const BOOL okFlush = FlushFileBuffers (h);
+        CloseHandle (h);
+        if (! okWrite || written != (DWORD) numBytes || ! okFlush) return false;
+    }
+    if (configFile.existsAsFile() && configFile.getSize() > 0) configFile.copyFileTo (bak);
+    return MoveFileExW (tmp.getFullPathName().toWideCharPointer(), configFile.getFullPathName().toWideCharPointer(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+   #else
     tmp.deleteFile();
     {
         juce::FileOutputStream out (tmp);
         if (out.failedToOpen()) return false;
         out.setPosition (0); out.truncate();
-        if (! out.write (text.toRawUTF8(), text.getNumBytesAsUTF8())) return false;
+        if (! out.write (bytes, numBytes)) return false;
         out.flush();
     }
     if (configFile.existsAsFile() && configFile.getSize() > 0) configFile.copyFileTo (bak);
-    return tmp.moveFileTo (configFile);
+    // rename() POSIX remplace la cible en une seule operation (moveFileTo l'effacait d'abord).
+    return std::rename (tmp.getFullPathName().toRawUTF8(), configFile.getFullPathName().toRawUTF8()) == 0;
+   #endif
 }

@@ -23,11 +23,44 @@
 #include <iostream>
 #include <string>
 
+#ifdef _WIN32
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN 1
+ #endif
+ #ifndef NOMINMAX
+  #define NOMINMAX 1
+ #endif
+ #include <windows.h>
+ #ifndef ENABLE_QUICK_EDIT_MODE
+  #define ENABLE_QUICK_EDIT_MODE 0x0040
+ #endif
+ #ifndef ENABLE_EXTENDED_FLAGS
+  #define ENABLE_EXTENDED_FLAGS 0x0080
+ #endif
+#endif
+
 namespace
 {
     std::atomic<bool> shouldQuit { false };
 
     void signalHandler (int) { shouldQuit.store (true); }
+
+   #ifdef _WIN32
+    // Exploitation 24/7 sous Windows (12 instances, une console chacune) :
+    //  - « Modification rapide » coupee : un clic dans la console y selectionne du texte et SUSPEND toute ecriture
+    //    sur la console ; les fils qui journalisent (envoi, titrage) restaient alors bloques, et le son avec ;
+    //  - plus de boite « a cesse de fonctionner » : un plantage doit terminer le processus pour de bon, afin que le
+    //    lecteur le relance, au lieu de le laisser fige derriere une fenetre que personne ne ferme.
+    void prepareWindowsConsole()
+    {
+        SetErrorMode (SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+
+        const HANDLE in = GetStdHandle (STD_INPUT_HANDLE);
+        DWORD mode = 0;
+        if (in != nullptr && in != INVALID_HANDLE_VALUE && GetConsoleMode (in, &mode))
+            SetConsoleMode (in, (mode & ~(DWORD) ENABLE_QUICK_EDIT_MODE) | (DWORD) ENABLE_EXTENDED_FLAGS);
+    }
+   #endif
 
     int parsePort (int argc, char** argv, int defaultPort)
     {
@@ -45,6 +78,9 @@ namespace
 
 int main (int argc, char** argv)
 {
+   #ifdef _WIN32
+    prepareWindowsConsole();
+   #endif
     const int port = parsePort (argc, argv, 8000);
 
     // Initialises the JUCE message manager (required for CoreAudio / WASAPI
