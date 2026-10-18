@@ -404,8 +404,9 @@ bool BroadcastSender::openConnection()
     // au bout de ~30 s et le premier paquet partait dans le vide (« write FAILED at call #2 »).
     char respBuf[1024] = {};
     int n = 0;
-    const auto deadline = juce::Time::getMillisecondCounter() + 5000;
-    while (n < (int) sizeof (respBuf) - 1 && juce::Time::getMillisecondCounter() < deadline)
+    // Ecart non signe depuis le debut (et non « now < echeance ») : juste meme quand le compteur 32 bits reboucle.
+    const auto readStartMs = juce::Time::getMillisecondCounter();
+    while (n < (int) sizeof (respBuf) - 1 && (juce::uint32) (juce::Time::getMillisecondCounter() - readStartMs) < 5000)
     {
         if (sock->waitUntilReady (true, 200) <= 0) { if (n > 0 && std::strstr (respBuf, "\r\n")) break; continue; }
         const int r = sock->read (respBuf + n, (int) sizeof (respBuf) - 1 - n, false);
@@ -502,6 +503,9 @@ void BroadcastSender::senderThreadLoop()
     std::vector<int16_t> pcmInterleaved (static_cast<size_t> (kChunkSamples) * 2);  // for AAC
 
     int backoffMs = 500;
+    // Le delai de reconnexion ne redescend a 500 ms qu'apres ~60 s d'envoi reussi : un serveur qui accepte puis
+    // coupe aussitot ne doit pas etre re-sollicite toutes les 500 ms (horloge HiRes : pas de rebouclage 32 bits).
+    double connectedSinceMs = 0.0;
 
     while (running.load())
     {
@@ -509,10 +513,11 @@ void BroadcastSender::senderThreadLoop()
 
         // Detect config change → force a clean reconnect cycle.
         const int epoch = configEpoch.load();
+        // Statut change AVANT closeConnection() (qui vide la FIFO) : pushAudio ne doit plus y ecrire pendant le reset.
         if (epoch != lastSeenConfigEpoch && status.load() == Status::Connected)
         {
-            closeConnection();
             status.store (Status::Disconnected);
+            closeConnection();
         }
         lastSeenConfigEpoch = epoch;
 
@@ -522,7 +527,7 @@ void BroadcastSender::senderThreadLoop()
             if (openConnection())
             {
                 status.store (Status::Connected);
-                backoffMs = 500;
+                connectedSinceMs = juce::Time::getMillisecondCounterHiRes();
             }
             else
             {
@@ -536,11 +541,16 @@ void BroadcastSender::senderThreadLoop()
 
         if (! wantConnect && (socket != nullptr || lameCtx != nullptr || aacCtx != nullptr))
         {
-            closeConnection();
             status.store (Status::Disconnected);
+            closeConnection();
         }
 
-        if (status.load() == Status::Connected && songDirty.load() && ! metadataInFlight.load())
+        if (status.load() == Status::Connected && backoffMs != 500
+            && juce::Time::getMillisecondCounterHiRes() - connectedSinceMs >= 60000.0)
+            backoffMs = 500;
+
+        if (status.load() == Status::Connected && songDirty.load() && ! metadataInFlight.load()
+            && juce::Time::getMillisecondCounterHiRes() >= metadataRetryAtMs.load())
             sendMetadata();
 
         // Drain → encode → write
@@ -638,8 +648,8 @@ void BroadcastSender::senderThreadLoop()
 
             if (encodeError)
             {
+                status.store (Status::Error);          // avant closeConnection() : course avec pushAudio
                 closeConnection();
-                status.store (Status::Error);
                 reconnects.fetch_add (1);
                 std::this_thread::sleep_for (std::chrono::milliseconds (backoffMs));
                 backoffMs = juce::jmin (backoffMs * 2, 30000);
@@ -653,15 +663,14 @@ void BroadcastSender::senderThreadLoop()
                 int written = -1;
                 if (socket->waitUntilReady (false /*write*/, 5000) > 0)
                     written = socket->write (outBuf.data(), encodedBytes);
-                static int writeCallCount = 0;
-                ++writeCallCount;
+                const auto callNo = ++writeCallCount;
 
                 // Log the first 5 writes verbosely, then at most every 5 min to avoid spam.
                 const auto nowMs = juce::Time::getMillisecondCounter();
-                if (writeCallCount <= 5 || nowMs - lastWriteLogMs >= 5 * 60 * 1000)
+                if (callNo <= 5 || (juce::uint32) (nowMs - lastWriteLogMs) >= 5 * 60 * 1000)
                 {
                     lastWriteLogMs = nowMs;
-                    std::cout << "[Broadcast] write #" << writeCallCount
+                    std::cout << "[Broadcast] write #" << callNo
                               << " asked=" << encodedBytes
                               << " wrote=" << written
                               << " total=" << (bytesSent.load() + (written > 0 ? written : 0)) << " B\n" << std::flush;
@@ -669,14 +678,14 @@ void BroadcastSender::senderThreadLoop()
 
                 if (written != encodedBytes)
                 {
-                    std::cout << "[Broadcast] !!! write FAILED at call #" << writeCallCount
+                    std::cout << "[Broadcast] !!! write FAILED at call #" << callNo
                               << " : asked " << encodedBytes
                               << " bytes, wrote " << written
                               << " (total sent so far : " << bytesSent.load() << " B)\n" << std::flush;
-                    writeCallCount = 0;  // reset for next connection
+                    writeCallCount.store (0);  // reset for next connection
                     setError ("connexion Icecast perdue (write retourne " + juce::String (written) + ")");
+                    status.store (Status::Error);          // avant closeConnection() : course avec pushAudio
                     closeConnection();
-                    status.store (Status::Error);
                     reconnects.fetch_add (1);
                     std::this_thread::sleep_for (std::chrono::milliseconds (backoffMs));
                     backoffMs = juce::jmin (backoffMs * 2, 30000);
@@ -687,10 +696,9 @@ void BroadcastSender::senderThreadLoop()
             else if (status.load() == Status::Connected)
             {
                 // Encoder produced 0 bytes (still buffering internally). Normal at start.
-                static int zeroEncodeCount = 0;
-                ++zeroEncodeCount;
-                if (zeroEncodeCount <= 3)
-                    std::cout << "[Broadcast] encoder produced 0 bytes (call #" << zeroEncodeCount
+                const auto zeroNo = ++zeroEncodeCount;
+                if (zeroNo <= 3)
+                    std::cout << "[Broadcast] encoder produced 0 bytes (call #" << zeroNo
                               << ", normal during warmup)\n" << std::flush;
             }
             // Real-time pacing is handled implicitly : we only get audio at real-time rate
@@ -710,6 +718,8 @@ void BroadcastSender::senderThreadLoop()
 // La requete part sur un fil detache (un seul a la fois, garde par metadataInFlight) : la connexion et l'attente
 // de la reponse (jusqu'a 6 s) ne retiennent plus le fil d'envoi audio. Si un envoi est deja en vol, le titre
 // reste en attente et repart au tour suivant.
+// Le titre n'est marque envoye que si Icecast repond 200 ; sinon (serveur injoignable, 401, 404 du point de montage…)
+// il reste en attente et repart 10 s plus tard.
 void BroadcastSender::sendMetadata()
 {
     if (metadataInFlight.exchange (true)) return;
@@ -722,10 +732,16 @@ void BroadcastSender::sendMetadata()
     std::thread ([this, cfg, song]
     {
         juce::StreamingSocket s;
+        const auto retryLater = [this]
+        {
+            metadataRetryAtMs.store (juce::Time::getMillisecondCounterHiRes() + 10000.0);
+            songDirty.store (true);               // pendingSong n'a pas ete vide : il repartira tel quel (ou le plus recent)
+            metadataInFlight.store (false);
+        };
         if (! s.connect (cfg.host, cfg.port, 3000))
         {
-            std::cout << "[Metadata] connexion impossible\n" << std::flush;
-            metadataInFlight.store (false);
+            std::cout << "[Metadata] connexion impossible (nouvel essai dans 10 s)\n" << std::flush;
+            retryLater();
             return;
         }
         const auto creds = juce::Base64::toBase64 (cfg.user.trim() + ":" + cfg.password.trim());
@@ -741,6 +757,12 @@ void BroadcastSender::sendMetadata()
         s.close();
         const juce::String first = juce::String (buf).upToFirstOccurrenceOf ("\r\n", false, false);
         std::cout << "[Metadata] " << song << " -> " << first << "\n" << std::flush;
+        if (! (first.startsWith ("HTTP/1.") && first.fromFirstOccurrenceOf (" ", false, false).startsWith ("200")))
+        {
+            std::cout << "[Metadata] titre non accepte (nouvel essai dans 10 s)\n" << std::flush;
+            retryLater();
+            return;
+        }
         {
             const juce::ScopedLock sl (songLock);
             currentSong = song;
