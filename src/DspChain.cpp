@@ -128,6 +128,21 @@ void DspChain::reset()
 
     for (auto& ch : midBp) for (auto& q : ch) q.reset();
     rmsInLSmooth = rmsInRSmooth = rmsOutLSmooth = rmsOutRSmooth = 0.0f;
+
+    // Garde-fou NaN 24/7 : TOUT l'etat interne est remis a zero, pas seulement les filtres ci-dessus. Un NaN loge dans
+    // une enveloppe de compresseur, le suréchantillonneur de l'ecreteur ou le tampon du limiteur a anticipation
+    // reinjecterait sinon du NaN au bloc suivant, indefiniment. Aucune allocation : reset()/fill() seulement
+    // (appele aussi depuis le fil audio).
+    if (clipOs != nullptr) clipOs->reset();
+    resetLookahead (laLen);
+    for (auto& f : agcSplit) f.reset();
+    for (auto& f : sideHp) f.reset();
+    for (auto& ch : kw) for (auto& f : ch) f.reset();
+    agc.envDb = 0.0f; agcLow.envDb = 0.0f; limiter.envDb = 0.0f;
+    for (auto& c : bandComps) c.envDb = 0.0f;
+    bandLimEnv.fill (0.0f);
+    loudBlockSum = 0.0; loudBlockN = 0; loudBlocks.fill (0.0); loudBlockIdx = 0;
+    loudMinuteEnergy = 0.0; loudMinuteInit = false;
 }
 
 void DspChain::resetLookahead (int n)
